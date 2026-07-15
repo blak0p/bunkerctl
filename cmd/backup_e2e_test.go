@@ -6,10 +6,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
 
+	"github.com/blak0p/bunkerctl/internal/compress"
+	"github.com/blak0p/bunkerctl/internal/packages"
 	"github.com/blak0p/bunkerctl/internal/podman"
 )
 
@@ -158,6 +161,193 @@ func TestBackup_Manifest_NoEditorError(t *testing.T) {
 
 // Compile-time guarantee the fs.FS seam type is used.
 var _ fs.FS = fstest.MapFS(nil)
+
+// TestBackup_Manifest_DedupesWhenBothDnfAndDnf5 is a RED test for a real-world
+// bug found by running `bunkerctl backup bunker` on a Fedora 40+ container:
+// when the detector finds BOTH dnf and dnf5 (common on modern Fedora where
+// `dnf` is a wrapper around dnf5), the lister runs twice and the manifest
+// contains each package twice. The pipeline MUST prefer dnf5 over dnf so the
+// list is unique.
+func TestBackup_Manifest_DedupesWhenBothDnfAndDnf5(t *testing.T) {
+	setSafeBackupDefaults(t)
+	destDir := t.TempDir()
+	destPath := filepath.Join(destDir, "bunker-fedora.bunker")
+	setBackupDestPath(t, destPath)
+	setBackupFormat(t, "docker-archive")
+	setBackupEditor(t, "true")
+
+	// The package list the dnf5 lister returns (real Fedora has 70+ pkgs;
+	// we just need enough to prove uniqueness after the bug).
+	dnf5List := "vim\ngit\nbash\n"
+	// dnf returns the same content (it's the same DB on Fedora 40+).
+	dnfList := dnf5List
+
+	setBackupRunner(t, &podman.FakeRunner{
+		VersionStr:    "podman version 5.0.0",
+		InspectResult: podman.InspectResult{ID: "fedora", Image: "fedora:40"},
+		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
+			// which dnf  → present
+			if len(cmd) == 2 && cmd[0] == "which" && cmd[1] == "dnf" {
+				return "", nil
+			}
+			// which dnf5 → present
+			if len(cmd) == 2 && cmd[0] == "which" && cmd[1] == "dnf5" {
+				return "", nil
+			}
+			// All other managers → absent.
+			if len(cmd) == 2 && cmd[0] == "which" {
+				return "", errFakeNonZero
+			}
+			// dnf repoquery → returns dnfList
+			if len(cmd) >= 1 && cmd[0] == "dnf" {
+				return dnfList, nil
+			}
+			// dnf5 repoquery → returns dnf5List
+			if len(cmd) >= 1 && cmd[0] == "dnf5" {
+				return dnf5List, nil
+			}
+			// cache clean + commit + save → succeed in the fake.
+			return "", nil
+		},
+	})
+
+	_, err := executeBackup(t, "fedora")
+	if err != nil {
+		t.Fatalf("backup error: %v", err)
+	}
+
+	// Decompress the .bunker and read manifest.toml from inside.
+	extractDir := t.TempDir()
+	if err := (compress.ZstdTar{}).Decompress(destPath, extractDir); err != nil {
+		t.Fatalf("decompress .bunker: %v", err)
+	}
+	manifestPath := filepath.Join(extractDir, "manifest.toml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	content := string(data)
+
+	// Assert each package appears exactly once in the manifest body.
+	for _, pkg := range []string{"vim", "git", "bash"} {
+		count := strings.Count(content, "\n"+pkg+" = \"\"")
+		if count != 1 {
+			t.Errorf("manifest has %d lines for %q, want 1\nmanifest:\n%s", count, pkg, content)
+		}
+	}
+}
+
+// TestBackup_Manifest_DedupesDuplicatesFromSingleLister triangulates: even when
+// a single lister returns a list with internal duplicates (e.g. an upstream
+// repoquery bug), the manifest MUST NOT contain duplicate keys (TOML forbids
+// them and the re-parse would fail). This is the package-level dedupe
+// defense-in-depth path.
+func TestBackup_Manifest_DedupesDuplicatesFromSingleLister(t *testing.T) {
+	setSafeBackupDefaults(t)
+	destDir := t.TempDir()
+	destPath := filepath.Join(destDir, "bunker-dups.bunker")
+	setBackupDestPath(t, destPath)
+	setBackupFormat(t, "docker-archive")
+	setBackupEditor(t, "true")
+
+	// dnf5 returns a list with one duplicate line (vim appears twice).
+	dupList := "vim\ngit\nvim\nbash\n"
+
+	setBackupRunner(t, &podman.FakeRunner{
+		VersionStr:    "podman version 5.0.0",
+		InspectResult: podman.InspectResult{ID: "dupbunker", Image: "fedora:40"},
+		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
+			if len(cmd) == 2 && cmd[0] == "which" && cmd[1] == "dnf5" {
+				return "", nil
+			}
+			if len(cmd) == 2 && cmd[0] == "which" {
+				return "", errFakeNonZero
+			}
+			if len(cmd) >= 1 && cmd[0] == "dnf5" {
+				return dupList, nil
+			}
+			return "", nil
+		},
+	})
+
+	_, err := executeBackup(t, "dupbunker")
+	if err != nil {
+		t.Fatalf("backup error: %v", err)
+	}
+
+	extractDir := t.TempDir()
+	if err := (compress.ZstdTar{}).Decompress(destPath, extractDir); err != nil {
+		t.Fatalf("decompress .bunker: %v", err)
+	}
+	manifestPath := filepath.Join(extractDir, "manifest.toml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	content := string(data)
+
+	// vim must appear exactly once even though the lister returned it twice.
+	if c := strings.Count(content, "\nvim = \"\""); c != 1 {
+		t.Errorf("manifest has %d lines for 'vim', want 1\nmanifest:\n%s", c, content)
+	}
+	if c := strings.Count(content, "\ngit = \"\""); c != 1 {
+		t.Errorf("manifest has %d lines for 'git', want 1\nmanifest:\n%s", c, content)
+	}
+	if c := strings.Count(content, "\nbash = \"\""); c != 1 {
+		t.Errorf("manifest has %d lines for 'bash', want 1\nmanifest:\n%s", c, content)
+	}
+}
+
+// TestDedupeManagers is a unit test for the pure dedupe helper: when both dnf
+// and dnf5 are detected, dnf is dropped; other managers are passed through in
+// order.
+func TestDedupeManagers(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []packages.Manager
+		want []packages.Manager
+	}{
+		{"empty", nil, []packages.Manager{}},
+		{"only dnf5", []packages.Manager{packages.ManagerDnf5}, []packages.Manager{packages.ManagerDnf5}},
+		{"only dnf", []packages.Manager{packages.ManagerDnf}, []packages.Manager{packages.ManagerDnf}},
+		{"dnf then dnf5", []packages.Manager{packages.ManagerDnf, packages.ManagerDnf5}, []packages.Manager{packages.ManagerDnf5}},
+		{"dnf5 then dnf (canonical order)", []packages.Manager{packages.ManagerDnf5, packages.ManagerDnf}, []packages.Manager{packages.ManagerDnf5}},
+		{"dnf + apt", []packages.Manager{packages.ManagerDnf, packages.ManagerApt}, []packages.Manager{packages.ManagerDnf, packages.ManagerApt}},
+		{"dnf + dnf5 + apt", []packages.Manager{packages.ManagerDnf, packages.ManagerDnf5, packages.ManagerApt}, []packages.Manager{packages.ManagerDnf5, packages.ManagerApt}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := dedupeManagers(c.in)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("dedupeManagers(%v) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestDedupeStrings is a unit test for the string dedupe helper: preserves
+// first-occurrence order, drops later occurrences.
+func TestDedupeStrings(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"nil", nil, []string{}},
+		{"empty", []string{}, []string{}},
+		{"no dupes", []string{"a", "b", "c"}, []string{"a", "b", "c"}},
+		{"with dupes", []string{"a", "b", "a", "c", "b"}, []string{"a", "b", "c"}},
+		{"all same", []string{"x", "x", "x"}, []string{"x"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := dedupeStrings(c.in)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("dedupeStrings(%v) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
 
 // --- PR 4: cache cleaning + archive production E2E ---
 
