@@ -37,6 +37,12 @@ type FakeRunner struct {
 	// command. When nil, Exec returns ("", f.Err).
 	ExecFn func(ctx context.Context, id string, cmd []string) (string, error)
 
+	// InspectRawFn, when non-nil, is called by InspectRaw. When nil,
+	// InspectRaw returns (f.InspectRawResult, f.InspectRawErr).
+	InspectRawFn     func(ctx context.Context, id string) (string, error)
+	InspectRawResult string
+	InspectRawErr    error
+
 	// Calls records invocations for assertion.
 	Calls []string
 }
@@ -76,4 +82,12 @@ func (f *FakeRunner) Exec(ctx context.Context, id string, cmd []string) (string,
 		return f.ExecFn(ctx, id, cmd)
 	}
 	return "", f.Err
+}
+
+func (f *FakeRunner) InspectRaw(ctx context.Context, id string) (string, error) {
+	f.Calls = append(f.Calls, "InspectRaw:"+id)
+	if f.InspectRawFn != nil {
+		return f.InspectRawFn(ctx, id)
+	}
+	return f.InspectRawResult, f.InspectRawErr
 }

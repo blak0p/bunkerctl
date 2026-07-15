@@ -260,6 +260,78 @@ func TestCLIRunner_Save_OciArchive(t *testing.T) {
 	}
 }
 
+// --- backup-format-v1 PR 2: InspectRaw (additive, non-breaking) ---
+
+// TestCLIRunner_InspectRaw_RunsPodmanInspect asserts InspectRaw runs
+// `podman inspect <id>` and returns the trimmed raw JSON.
+func TestCLIRunner_InspectRaw_RunsPodmanInspect(t *testing.T) {
+	b := &argsBackend{out: `[{"Id":"abc","Image":"fedora:45"}]`}
+	r := &CLIRunner{bin: "podman", exec: b}
+	got, err := r.InspectRaw(context.Background(), "bunker")
+	if err != nil {
+		t.Fatalf("InspectRaw error: %v", err)
+	}
+	wantArgs := []string{"inspect", "bunker"}
+	if len(b.args) != len(wantArgs) {
+		t.Fatalf("InspectRaw args = %v, want %v", b.args, wantArgs)
+	}
+	for i, w := range wantArgs {
+		if b.args[i] != w {
+			t.Errorf("InspectRaw args[%d] = %q, want %q", i, b.args[i], w)
+		}
+	}
+	if got != `[{"Id":"abc","Image":"fedora:45"}]` {
+		t.Errorf("InspectRaw output = %q, want raw JSON", got)
+	}
+}
+
+// TestCLIRunner_InspectRaw_RejectsInvalidName asserts name validation still
+// fires before the exec call.
+func TestCLIRunner_InspectRaw_RejectsInvalidName(t *testing.T) {
+	b := &argsBackend{}
+	r := &CLIRunner{bin: "podman", exec: b}
+	_, err := r.InspectRaw(context.Background(), "bad;name")
+	if !errors.Is(err, ErrInvalidContainerName) {
+		t.Errorf("InspectRaw(bad;name) err = %v, want ErrInvalidContainerName", err)
+	}
+	if b.args != nil {
+		t.Errorf("InspectRaw(bad;name) spawned podman; want no exec call")
+	}
+}
+
+// TestFakeRunner_InspectRaw_ReturnsConfigured triangulates the fake.
+func TestFakeRunner_InspectRaw_ReturnsConfigured(t *testing.T) {
+	r := &FakeRunner{InspectRawResult: `[{"Id":"xyz"}]`}
+	got, err := r.InspectRaw(context.Background(), "bunker")
+	if err != nil {
+		t.Fatalf("FakeRunner.InspectRaw error: %v", err)
+	}
+	if got != `[{"Id":"xyz"}]` {
+		t.Errorf("FakeRunner.InspectRaw = %q, want configured JSON", got)
+	}
+}
+
+// TestFakeRunner_InspectRaw_ExecFnPassthrough triangulates the Fn override path.
+func TestFakeRunner_InspectRaw_ExecFnPassthrough(t *testing.T) {
+	called := false
+	r := &FakeRunner{
+		InspectRawFn: func(ctx context.Context, id string) (string, error) {
+			called = true
+			if id != "bunker" {
+				t.Errorf("InspectRawFn id = %q, want bunker", id)
+			}
+			return "custom", nil
+		},
+	}
+	got, _ := r.InspectRaw(context.Background(), "bunker")
+	if !called {
+		t.Errorf("InspectRawFn not invoked")
+	}
+	if got != "custom" {
+		t.Errorf("InspectRaw = %q, want custom", got)
+	}
+}
+
 // TestCLIRunner_Commit_RunsPodmanCommit is a RED test: Commit MUST run
 // `podman commit <id> <image>`.
 func TestCLIRunner_Commit_RunsPodmanCommit(t *testing.T) {

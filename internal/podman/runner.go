@@ -136,6 +136,10 @@ type Runner interface {
 	Save(ctx context.Context, image, format, dest string) error
 	// Exec runs `podman exec <id> <cmd>`. Implemented in a later PR.
 	Exec(ctx context.Context, id string, cmd []string) (string, error)
+	// InspectRaw runs `podman inspect <id>` and returns the raw JSON output
+	// (a JSON array of objects). It is a non-breaking addition used by the
+	// backup-format-v1 inspect package to parse full container metadata.
+	InspectRaw(ctx context.Context, id string) (string, error)
 }
 
 // execBackend is the seam between CLIRunner and os/exec. It exists so tests
@@ -252,6 +256,21 @@ func (r *CLIRunner) Exec(ctx context.Context, id string, cmd []string) (string, 
 	}
 	args := append([]string{"exec", id}, cmd...)
 	out, err := r.exec.CombinedOutput(ctx, r.bin, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// InspectRaw runs `podman inspect <id>` and returns the raw JSON output (a JSON
+// array of objects). The existing Inspect returns a minimal stub; this method
+// exposes the full payload so callers like internal/inspect can parse the
+// fields they need without depending on the stub's shape.
+func (r *CLIRunner) InspectRaw(ctx context.Context, id string) (string, error) {
+	if err := validateContainerName(id); err != nil {
+		return "", err
+	}
+	out, err := r.exec.CombinedOutput(ctx, r.bin, "inspect", id)
 	if err != nil {
 		return "", err
 	}

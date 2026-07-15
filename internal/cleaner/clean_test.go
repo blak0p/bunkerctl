@@ -35,6 +35,9 @@ func (r *recordingRunner) Exec(ctx context.Context, id string, cmd []string) (st
 	r.calls = append(r.calls, c)
 	return "", r.execErr
 }
+func (r *recordingRunner) InspectRaw(ctx context.Context, id string) (string, error) {
+	return "", nil
+}
 
 // TestCleaner_Clean_Apt is the RED anchor: DefaultCleaner.Clean with [ManagerApt]
 // MUST call runner.Exec exactly once with ["rm","-rf","/var/cache/apt/archives"].

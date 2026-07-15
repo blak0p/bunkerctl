@@ -52,6 +52,9 @@ func (r *callRunner) Save(ctx context.Context, image, format, dest string) error
 func (r *callRunner) Exec(ctx context.Context, id string, cmd []string) (string, error) {
 	return "", nil
 }
+func (r *callRunner) InspectRaw(ctx context.Context, id string) (string, error) {
+	return "", nil
+}
 
 // newProducer wires a DefaultProducer with real compress + metadata writers.
 func newProducer() DefaultProducer {
