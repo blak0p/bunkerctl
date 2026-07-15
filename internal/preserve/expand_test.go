@@ -40,15 +40,77 @@ func TestParseLine_WhitespaceTrimmed(t *testing.T) {
 // TestParseLine_GlobDetected triangulates: a line with glob metacharacters is
 // classified as a glob entry.
 func TestParseLine_GlobDetected(t *testing.T) {
+	e, err := ParseLine("/projects/**")
+	if err != nil {
+		t.Fatalf("ParseLine error: %v", err)
+	}
+	if e.Raw != "/projects/**" {
+		t.Errorf("ParseLine Raw = %q, want %q", e.Raw, "/projects/**")
+	}
+	if !e.IsGlob {
+		t.Errorf("ParseLine IsGlob = false, want true for glob pattern")
+	}
+}
+
+// TestParseLine_TildeExpandedInLiteral verifies that a literal path starting
+// with "~/" is expanded to the user's home directory. This is the fix for the
+// bug where `~/.config/fish` in the config was passed to the FS literally
+// (with the tilde) and Stat/ReadFile failed because "~/.config/fish" does not
+// exist on disk.
+func TestParseLine_TildeExpandedInLiteral(t *testing.T) {
+	t.Setenv("HOME", "/home/testuser")
+	e, err := ParseLine("~/.config/fish")
+	if err != nil {
+		t.Fatalf("ParseLine error: %v", err)
+	}
+	if e.Raw != "/home/testuser/.config/fish" {
+		t.Errorf("ParseLine Raw = %q, want %q (tilde should be expanded)", e.Raw, "/home/testuser/.config/fish")
+	}
+	if e.IsGlob {
+		t.Errorf("ParseLine IsGlob = true, want false (literal path)")
+	}
+}
+
+// TestParseLine_TildeExpandedInGlob triangulates: a glob pattern with a "~/"
+// prefix is also expanded to the home dir (so doublestar sees an absolute
+// path it can walk).
+func TestParseLine_TildeExpandedInGlob(t *testing.T) {
+	t.Setenv("HOME", "/home/testuser")
 	e, err := ParseLine("~/projects/**")
 	if err != nil {
 		t.Fatalf("ParseLine error: %v", err)
 	}
-	if e.Raw != "~/projects/**" {
-		t.Errorf("ParseLine Raw = %q, want %q", e.Raw, "~/projects/**")
+	if e.Raw != "/home/testuser/projects/**" {
+		t.Errorf("ParseLine Raw = %q, want %q (tilde should be expanded)", e.Raw, "/home/testuser/projects/**")
 	}
 	if !e.IsGlob {
 		t.Errorf("ParseLine IsGlob = false, want true for glob pattern")
+	}
+}
+
+// TestParseLine_TildeInMiddleNotExpanded verifies that a tilde in the MIDDLE
+// of a path is NOT expanded (only the leading "~/" form is recognized).
+func TestParseLine_TildeInMiddleNotExpanded(t *testing.T) {
+	t.Setenv("HOME", "/home/testuser")
+	e, err := ParseLine("/var/log/some~file")
+	if err != nil {
+		t.Fatalf("ParseLine error: %v", err)
+	}
+	if e.Raw != "/var/log/some~file" {
+		t.Errorf("ParseLine Raw = %q, want %q", e.Raw, "/var/log/some~file")
+	}
+}
+
+// TestParseLine_LoneTildeExpanded verifies that a bare "~" (no slash) is
+// expanded to the user's home dir, matching the standard shell convention.
+func TestParseLine_LoneTildeExpanded(t *testing.T) {
+	t.Setenv("HOME", "/home/testuser")
+	e, err := ParseLine("~")
+	if err != nil {
+		t.Fatalf("ParseLine error: %v", err)
+	}
+	if e.Raw != "/home/testuser" {
+		t.Errorf("ParseLine Raw = %q, want %q (lone ~ expanded to $HOME)", e.Raw, "/home/testuser")
 	}
 }
 

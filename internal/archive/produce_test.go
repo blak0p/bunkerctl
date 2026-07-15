@@ -214,7 +214,35 @@ func TestProducer_Produce_VersionFromOptions(t *testing.T) {
 	}
 }
 
-// --- helpers ---
+// TestProducer_PassesManagersAndPreserveCount is a RED test for a real-world
+// bug found by inspecting the .bunker file from `bunkerctl backup bunker`:
+// metadata.json had `"managers": null` and `"preserve_count": 0` even when both
+// were populated. The producer MUST accept the detected managers and the
+// staged file count and embed them in the metadata so the restore pipeline
+// (SDD 2) and end users can introspect the archive.
+func TestProducer_PassesManagersAndPreserveCount(t *testing.T) {
+	r := &callRunner{inspectResult: podman.InspectResult{ID: "fedora", Image: "fedora:40"}}
+	staging := t.TempDir()
+	dest := filepath.Join(t.TempDir(), "meta.bunker")
+
+	p := newProducer()
+	md, err := p.Produce(context.Background(), r, r.inspectResult, staging, dest, ProduceOptions{
+		Format:        "docker-archive",
+		BackupDate:    time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
+		Version:       "0.1.0",
+		Managers:      []string{"dnf5"},
+		PreserveCount: 42,
+	})
+	if err != nil {
+		t.Fatalf("Produce error: %v", err)
+	}
+	if len(md.Managers) != 1 || md.Managers[0] != "dnf5" {
+		t.Errorf("Metadata.Managers = %v, want [dnf5]", md.Managers)
+	}
+	if md.PreserveCount != 42 {
+		t.Errorf("Metadata.PreserveCount = %d, want 42", md.PreserveCount)
+	}
+}
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()

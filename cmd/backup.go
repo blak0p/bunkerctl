@@ -339,9 +339,11 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		MetaWriter: metadata.JSONWriter{},
 	}
 	if _, err := producer.Produce(ctx, runner, inspectResult, stagingDir, destPath, archive.ProduceOptions{
-		Format:     format,
-		BackupDate: backupDate,
-		Version:    Version,
+		Format:        format,
+		BackupDate:    backupDate,
+		Version:       Version,
+		Managers:      managerNames(managers),
+		PreserveCount: stagedCount,
 	}); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "error: producing archive: %v\n", err)
 		return err
@@ -489,6 +491,17 @@ func dedupeStrings(in []string) []string {
 		}
 		seen[s] = struct{}{}
 		out = append(out, s)
+	}
+	return out
+}
+
+// managerNames converts a slice of packages.Manager to a slice of plain string
+// names ("dnf5", "apt", ...) suitable for embedding in metadata.json. The
+// returned slice preserves the order of the input.
+func managerNames(in []packages.Manager) []string {
+	out := make([]string, 0, len(in))
+	for _, m := range in {
+		out = append(out, string(m))
 	}
 	return out
 }

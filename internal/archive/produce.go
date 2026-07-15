@@ -29,6 +29,15 @@ type ProduceOptions struct {
 	// metadata. When empty, Metadata.Version falls back to "1" (legacy
 	// schema version) for backwards compatibility with PR 4 archives.
 	Version string
+	// Managers is the list of detected package managers (e.g. ["dnf5"]). When
+	// non-nil, recorded in Metadata.Managers so the restore pipeline (SDD 2)
+	// knows which installer to re-invoke. nil means "no managers detected" (not
+	// the same as an empty slice).
+	Managers []string
+	// PreserveCount is the number of files staged from the preserve-list.
+	// Recorded in Metadata.PreserveCount for user-visible introspection; restore
+	// does not strictly need it but it is useful for diagnosing partial backups.
+	PreserveCount int
 }
 
 // Producer produces a .bunker archive from a container + staging dir.
@@ -77,6 +86,8 @@ func (p DefaultProducer) Produce(ctx context.Context, runner podman.Runner, cont
 		CreatedAt:     opts.BackupDate,
 		Format:        opts.Format,
 		Version:       metaVersion,
+		Managers:      opts.Managers,
+		PreserveCount: opts.PreserveCount,
 	}
 	metaPath := filepath.Join(stagingDir, "metadata.json")
 	if err := p.MetaWriter.Write(metaPath, md); err != nil {
