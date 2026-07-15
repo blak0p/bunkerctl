@@ -31,6 +31,8 @@ func TestBackup_PreserveStaging_E2E(t *testing.T) {
 	}
 	setBackupConfigPath(t, cfgPath)
 	setBackupStagingRoot(t, t.TempDir())
+	setBackupDestPath(t, filepath.Join(t.TempDir(), "bunker-mybunker.bunker"))
+	setBackupFormat(t, "docker-archive")
 
 	// Fake FS with matching files + an excluded dir.
 	fsys := fstest.MapFS{
@@ -77,6 +79,8 @@ func TestBackup_PreserveStaging_EmptyConfig(t *testing.T) {
 	}
 	setBackupConfigPath(t, cfgPath)
 	setBackupStagingRoot(t, t.TempDir())
+	setBackupDestPath(t, filepath.Join(t.TempDir(), "bunker-empty.bunker"))
+	setBackupFormat(t, "docker-archive")
 	setBackupEditor(t, "true")
 
 	setBackupRunner(t, &podman.FakeRunner{
@@ -102,6 +106,8 @@ func TestBackup_PreserveStaging_EmptyConfig(t *testing.T) {
 func TestBackup_PreserveStaging_MissingConfig(t *testing.T) {
 	setBackupConfigPath(t, filepath.Join(t.TempDir(), "nope.toml"))
 	setBackupStagingRoot(t, t.TempDir())
+	setBackupDestPath(t, filepath.Join(t.TempDir(), "bunker-new.bunker"))
+	setBackupFormat(t, "docker-archive")
 	setBackupEditor(t, "true")
 
 	setBackupRunner(t, &podman.FakeRunner{
@@ -152,3 +158,95 @@ func TestBackup_Manifest_NoEditorError(t *testing.T) {
 
 // Compile-time guarantee the fs.FS seam type is used.
 var _ fs.FS = fstest.MapFS(nil)
+
+// --- PR 4: cache cleaning + archive production E2E ---
+
+// TestBackup_ArchiveProduction_E2E is a RED test: the full pipeline with a
+// FakeRunner (fake image + fake exec outputs) MUST run all the way to
+// "backup created: <destPath>" and produce a real .bunker file that is a
+// valid zstd-compressed tar.
+func TestBackup_ArchiveProduction_E2E(t *testing.T) {
+	setSafeBackupDefaults(t)
+	// Steer the dest path into a temp dir so we can assert the file exists.
+	destDir := t.TempDir()
+	setBackupDestPath(t, filepath.Join(destDir, "bunker-mybunker.bunker"))
+	setBackupFormat(t, "docker-archive")
+
+	setBackupRunner(t, &podman.FakeRunner{
+		VersionStr:    "podman version 5.0.0",
+		InspectResult: podman.InspectResult{ID: "mybunker", Image: "fedora:40"},
+		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
+			// apt is present → cache cleaning runs.
+			if len(cmd) == 2 && cmd[0] == "which" && cmd[1] == "apt" {
+				return "", nil
+			}
+			if len(cmd) == 2 && cmd[0] == "apt-mark" {
+				return "vim\ngit\n", nil
+			}
+			// rm -rf cache → succeed (no-op in the fake).
+			return "", nil
+		},
+	})
+
+	out, err := executeBackup(t, "mybunker")
+	if err != nil {
+		t.Fatalf("backup error: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "backup created:") {
+		t.Errorf("output = %q, want substring 'backup created:'", out)
+	}
+	if !strings.Contains(out, "cleaned") {
+		t.Errorf("output = %q, want substring 'cleaned'", out)
+	}
+	// The .bunker file must exist and be non-empty.
+	dest := filepath.Join(destDir, "bunker-mybunker.bunker")
+	fi, err := os.Stat(dest)
+	if err != nil {
+		t.Fatalf(".bunker file not created at %s: %v", dest, err)
+	}
+	if fi.Size() == 0 {
+		t.Fatalf(".bunker file is empty")
+	}
+	// It must be a valid zstd stream (zstd magic: 0x28 0xB5 0x2F 0xFD).
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read .bunker: %v", err)
+	}
+	if len(data) < 4 || data[0] != 0x28 || data[1] != 0xB5 || data[2] != 0x2F || data[3] != 0xFD {
+		t.Errorf(".bunker first bytes = % x, want zstd magic 28 b5 2f fd", data[:4])
+	}
+}
+
+// TestBackup_ArchiveProduction_NoManagers triangulates: a container with no
+// detectable managers → the cleaner is a no-op and the archive still succeeds.
+func TestBackup_ArchiveProduction_NoManagers(t *testing.T) {
+	setSafeBackupDefaults(t)
+	destDir := t.TempDir()
+	setBackupDestPath(t, filepath.Join(destDir, "bunker-nomgr.bunker"))
+	setBackupFormat(t, "docker-archive")
+
+	setBackupRunner(t, &podman.FakeRunner{
+		VersionStr:    "podman version 5.0.0",
+		InspectResult: podman.InspectResult{ID: "nomgr", Image: "alpine:3.20"},
+		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
+			// No manager present → every which exits non-zero.
+			return "", errFakeNonZero
+		},
+	})
+
+	out, err := executeBackup(t, "nomgr")
+	if err != nil {
+		t.Fatalf("backup error: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "backup created:") {
+		t.Errorf("output = %q, want substring 'backup created:'", out)
+	}
+	// No managers → no cache cleaning (no "cleaned" line).
+	if strings.Contains(out, "cleaned") {
+		t.Errorf("output = %q, did NOT expect 'cleaned' with no managers", out)
+	}
+	dest := filepath.Join(destDir, "bunker-nomgr.bunker")
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf(".bunker file not created: %v", err)
+	}
+}

@@ -27,6 +27,16 @@ var ErrInvalidContainerName = errors.New("invalid container name")
 // reports the requested container does not exist.
 var ErrContainerNotFound = errors.New("container not found")
 
+// ErrInvalidFormat is returned by Save when the requested --format value is not
+// in the allowed set (docker-archive, oci-archive).
+var ErrInvalidFormat = errors.New("invalid save format")
+
+// allowedSaveFormats is the set of --format values accepted by Save.
+var allowedSaveFormats = map[string]bool{
+	"docker-archive": true,
+	"oci-archive":    true,
+}
+
 // maxContainerNameLen is the Podman-imposed upper bound on container name/ID
 // length. Names longer than this are rejected defensively.
 const maxContainerNameLen = 256
@@ -61,7 +71,30 @@ func validateContainerName(name string) error {
 	return nil
 }
 
-// Container is a minimal description of a Podman container, returned by
+// validateImageRef validates an image reference passed to Commit/Save. Image
+// refs are more permissive than container names — they allow `:` (tags),
+// `/` (registry paths), and `@` (digests) — but still reject shell
+// metacharacters and whitespace to prevent injection. Empty or overlong refs
+// are rejected with ErrInvalidContainerName (the shared name/error sentinel).
+func validateImageRef(ref string) error {
+	if ref == "" {
+		return ErrInvalidContainerName
+	}
+	if len(ref) > maxContainerNameLen {
+		return ErrInvalidContainerName
+	}
+	for _, c := range ref {
+		switch c {
+		case ':', '/', '@', '.', '_', '-':
+			continue
+		}
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		return ErrInvalidContainerName
+	}
+	return nil
+}
 // Runner.List. Fields are filled in by later slices; this PR only declares
 // the shape.
 type Container struct {
@@ -175,26 +208,31 @@ func (r *CLIRunner) Inspect(ctx context.Context, id string) (InspectResult, erro
 	return InspectResult{ID: id, Image: strings.TrimSpace(string(out))}, nil
 }
 
-// Commit runs `podman commit <id> <image>`. PR 2 wires the name validation
-// seam; the full commit-pipeline behavior arrives in a later PR.
+// Commit runs `podman commit <id> <image>`. The container id is validated with
+// validateContainerName; the image ref with validateImageRef (which allows tags
+// and registry paths).
 func (r *CLIRunner) Commit(ctx context.Context, id, image string) error {
 	if err := validateContainerName(id); err != nil {
 		return err
 	}
-	if err := validateContainerName(image); err != nil {
+	if err := validateImageRef(image); err != nil {
 		return err
 	}
 	_, err := r.exec.CombinedOutput(ctx, r.bin, "commit", id, image)
 	return err
 }
 
-// Save runs `podman save <image> -o <dest> -f <format>`. PR 2 wires the name
-// validation seam; the full save-pipeline behavior arrives in a later PR.
+// Save runs `podman save --format=<format> -o <dest> <image>`. The format MUST be
+// docker-archive or oci-archive; anything else returns ErrInvalidFormat BEFORE
+// spawning the podman process. The image ref is validated with validateImageRef.
 func (r *CLIRunner) Save(ctx context.Context, image, format, dest string) error {
-	if err := validateContainerName(image); err != nil {
+	if !allowedSaveFormats[format] {
+		return ErrInvalidFormat
+	}
+	if err := validateImageRef(image); err != nil {
 		return err
 	}
-	_, err := r.exec.CombinedOutput(ctx, r.bin, "save", image, "-o", dest, "-f", format)
+	_, err := r.exec.CombinedOutput(ctx, r.bin, "save", "--format="+format, "-o", dest, image)
 	return err
 }
 
