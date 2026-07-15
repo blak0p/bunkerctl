@@ -35,3 +35,6 @@ go.work.sum
 # bunkerctl runtime
 ~/.bunkerctl/backups/
 ~/.bunkerctl/tmp/
+
+# Backup archives produced by `bunkerctl backup`
+*.bunker

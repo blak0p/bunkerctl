@@ -25,7 +25,7 @@ import (
 type InspectData struct {
 	ID    string
 	Image string
-	User  string // Config.User (e.g. "1000" or "alejndro"); empty defaults to "0"
+	User string // Config.User (e.g. "1000" or a username); empty defaults to "0"
 	Env   []string
 	State ContainerState
 }
