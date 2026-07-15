@@ -18,6 +18,12 @@ type FakeRunner struct {
 	InspectResult InspectResult
 	InspectErr    error
 
+	// ExecFn, when non-nil, is called by Exec and its return values are
+	// passed through. This lets cmd-level tests drive package detection and
+	// listing through the Runner seam with canned output keyed by the joined
+	// command. When nil, Exec returns ("", f.Err).
+	ExecFn func(ctx context.Context, id string, cmd []string) (string, error)
+
 	// Calls records invocations for assertion.
 	Calls []string
 }
@@ -52,5 +58,8 @@ func (f *FakeRunner) Save(ctx context.Context, image, format, dest string) error
 
 func (f *FakeRunner) Exec(ctx context.Context, id string, cmd []string) (string, error) {
 	f.Calls = append(f.Calls, "Exec:"+id)
+	if f.ExecFn != nil {
+		return f.ExecFn(ctx, id, cmd)
+	}
 	return "", f.Err
 }

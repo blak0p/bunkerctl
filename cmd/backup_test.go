@@ -78,6 +78,7 @@ func TestBackup_EngineUnavailable(t *testing.T) {
 // interactive chooser: with no positional arg and a fake container list,
 // feeding stdin "2\n" selects the second container and prints "selected".
 func TestBackup_EngineAvailable_NoArg_InteractiveSelection(t *testing.T) {
+	setSafeBackupDefaults(t)
 	containers := []podman.Container{
 		{ID: "id1", Names: []string{"c1"}, Image: "img1", Status: "running"},
 		{ID: "id2", Names: []string{"c2"}, Image: "img2", Status: "running"},
@@ -98,8 +99,11 @@ func TestBackup_EngineAvailable_NoArg_InteractiveSelection(t *testing.T) {
 	if !strings.Contains(out, "c2") {
 		t.Errorf("output = %q, want substring 'c2' (selected container)", out)
 	}
-	if !strings.Contains(out, "selected") {
-		t.Errorf("output = %q, want substring 'selected'", out)
+	// PR 3: the pipeline now proceeds past selection into staging. The old
+	// "selected:" placeholder was replaced by "staged N files". Assert the
+	// container name still appears and staging ran.
+	if !strings.Contains(out, "staged 0 files") {
+		t.Errorf("output = %q, want substring 'staged 0 files'", out)
 	}
 }
 
@@ -107,6 +111,7 @@ func TestBackup_EngineAvailable_NoArg_InteractiveSelection(t *testing.T) {
 // selection: `bunkerctl backup mybunker` with the engine OK and the container
 // found MUST exit 0 and mention the container name + "selected".
 func TestBackup_ExplicitName_SelectsDirectly(t *testing.T) {
+	setSafeBackupDefaults(t)
 	setBackupRunner(t, &podman.FakeRunner{
 		VersionStr:    "podman version 5.0.0",
 		InspectResult: podman.InspectResult{ID: "mybunker", Image: "fedora:40"},
@@ -118,8 +123,9 @@ func TestBackup_ExplicitName_SelectsDirectly(t *testing.T) {
 	if !strings.Contains(out, "mybunker") {
 		t.Errorf("output = %q, want substring 'mybunker'", out)
 	}
-	if !strings.Contains(out, "selected") {
-		t.Errorf("output = %q, want substring 'selected'", out)
+	// PR 3: selection placeholder replaced by staging output.
+	if !strings.Contains(out, "staged 0 files") {
+		t.Errorf("output = %q, want substring 'staged 0 files'", out)
 	}
 }
 
@@ -191,6 +197,7 @@ func TestBackup_InvalidName_DifferentChar(t *testing.T) {
 // path with a different version string to prove the engine check reads the
 // real Version return rather than a hardcoded value.
 func TestBackup_EngineAvailable_TriangulateVersion(t *testing.T) {
+	setSafeBackupDefaults(t)
 	setBackupRunner(t, &podman.FakeRunner{
 		VersionStr:    "podman version 4.9.9",
 		InspectResult: podman.InspectResult{ID: "devbox", Image: "ubuntu:24.04"},
@@ -202,9 +209,12 @@ func TestBackup_EngineAvailable_TriangulateVersion(t *testing.T) {
 	if !strings.Contains(out, "devbox") {
 		t.Errorf("output = %q, want substring 'devbox'", out)
 	}
-	// Ensure no engine-error message leaked on the happy path.
-	if strings.Contains(strings.ToLower(out), "engine") && !strings.Contains(out, "selected") {
-		t.Errorf("happy path output mentions engine unexpectedly: %q", out)
+	// PR 3: the engine-OK happy path now proceeds to staging. Assert no
+	// engine-ERROR message leaked. We check only the first meaningful line
+	// (staging summary) to avoid false positives from temp-path test names.
+	firstLine := strings.SplitN(out, "\n", 2)[0]
+	if strings.Contains(strings.ToLower(firstLine), "engine") {
+		t.Errorf("happy path first line mentions engine unexpectedly: %q", firstLine)
 	}
 }
 
