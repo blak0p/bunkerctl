@@ -1,14 +1,10 @@
 package staging
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"testing/fstest"
-
-	"github.com/blak0p/bunkerctl/internal/preserve"
 )
 
 // TestLocalStager_Prepare_CreatesDir verifies that Prepare returns a staging
@@ -46,7 +42,6 @@ func TestLocalStager_Cleanup_RemovesDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare error: %v", err)
 	}
-	// Drop a file inside to prove cleanup removes contents too.
 	if err := os.WriteFile(filepath.Join(dir, "marker.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write marker: %v", err)
 	}
@@ -56,19 +51,10 @@ func TestLocalStager_Cleanup_RemovesDir(t *testing.T) {
 	}
 }
 
-// copyFS is a small fstest.MapFS with two real files for Copy tests.
-func copyFS() fstest.MapFS {
-	return fstest.MapFS{
-		"projects/proj1/main.go":   {Data: []byte("package main")},
-		"projects/proj1/README.md": {Data: []byte("readme")},
-		"projects/proj2/main.go":   {Data: []byte("package main2")},
-	}
-}
-
-// TestLocalStager_Copy_GlobsAndLiterals verifies Copy expands preserve entries
-// (glob + literal) and copies matched files into <staging>/preserve/ with their
-// original content preserved.
-func TestLocalStager_Copy_GlobsAndLiterals(t *testing.T) {
+// TestLocalStager_Prepare_CreatesFilesDir verifies the new layout: Prepare MUST
+// create a files/ subdirectory (not the old preserve/) so the container-side
+// copy step has a target to extract into.
+func TestLocalStager_Prepare_CreatesFilesDir(t *testing.T) {
 	root := t.TempDir()
 	stager := LocalStager{Root: root, ContainerID: "c1"}
 	dir, cleanup, err := stager.Prepare()
@@ -77,44 +63,20 @@ func TestLocalStager_Copy_GlobsAndLiterals(t *testing.T) {
 	}
 	defer cleanup()
 
-	entries := []preserve.Entry{
-		{Raw: "projects/**", IsGlob: true},
-		{Raw: "projects/proj1/README.md", IsGlob: false},
-	}
-	expander := preserve.Expander{FS: copyFS()}
-	if err := stager.Copy(nil, entries, expander); err != nil {
-		t.Fatalf("Copy error: %v", err)
-	}
-
-	preserveDir := filepath.Join(dir, "preserve")
-	// The glob matches 3 files; the literal is one of those 3 (already counted),
-	// so we expect 3 files under preserve/. Order is not guaranteed.
-	var found []string
-	_ = filepath.WalkDir(preserveDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		found = append(found, p)
-		return nil
-	})
-	if len(found) != 3 {
-		t.Fatalf("Copied files len = %d %v, want 3", len(found), found)
-	}
-
-	// Verify content of one copied file is intact.
-	mainPath := filepath.Join(preserveDir, "projects", "proj1", "main.go")
-	b, err := os.ReadFile(mainPath)
+	filesDir := filepath.Join(dir, "files")
+	info, err := os.Stat(filesDir)
 	if err != nil {
-		t.Fatalf("read copied main.go: %v", err)
+		t.Fatalf("files/ subdir not created: %v", err)
 	}
-	if string(b) != "package main" {
-		t.Errorf("copied main.go content = %q, want %q", string(b), "package main")
+	if !info.IsDir() {
+		t.Errorf("files/ path %q is not a directory", filesDir)
 	}
 }
 
-// TestLocalStager_Copy_LiteralMissingSkipped triangulates: a literal entry that
-// matches nothing is skipped silently (no error, no copy).
-func TestLocalStager_Copy_LiteralMissingSkipped(t *testing.T) {
+// TestLocalStager_Prepare_CreatesPreserveDir triangulates: the legacy preserve/
+// subdirectory is still created during the transition (removed once the v0.1.0
+// host-side copy path is deleted).
+func TestLocalStager_Prepare_CreatesPreserveDir(t *testing.T) {
 	root := t.TempDir()
 	stager := LocalStager{Root: root, ContainerID: "c2"}
 	dir, cleanup, err := stager.Prepare()
@@ -123,36 +85,15 @@ func TestLocalStager_Copy_LiteralMissingSkipped(t *testing.T) {
 	}
 	defer cleanup()
 
-	entries := []preserve.Entry{
-		{Raw: "projects/proj1/missing.go", IsGlob: false},
-	}
-	expander := preserve.Expander{FS: copyFS()}
-	if err := stager.Copy(nil, entries, expander); err != nil {
-		t.Fatalf("Copy error: %v", err)
-	}
-
-	// preserve dir exists but contains no files (the literal was skipped).
 	preserveDir := filepath.Join(dir, "preserve")
 	if _, err := os.Stat(preserveDir); err != nil {
-		t.Fatalf("preserve dir not created: %v", err)
-	}
-	var count int
-	_ = filepath.WalkDir(preserveDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		count++
-		return nil
-	})
-	if count != 0 {
-		t.Errorf("copied files = %d, want 0 (missing literal skipped)", count)
+		t.Errorf("preserve/ subdir not created: %v", err)
 	}
 }
 
-// TestLocalStager_Copy_GlobNoMatchSkipped triangulates: a glob that matches
-// nothing produces ErrGlobNoMatch which Copy treats as a warning (no error
-// returned), and no files are copied for that entry.
-func TestLocalStager_Copy_GlobNoMatchSkipped(t *testing.T) {
+// TestLocalStager_FilesDir verifies FilesDir returns the path to the files/
+// subdirectory under the prepared staging dir.
+func TestLocalStager_FilesDir(t *testing.T) {
 	root := t.TempDir()
 	stager := LocalStager{Root: root, ContainerID: "c3"}
 	dir, cleanup, err := stager.Prepare()
@@ -161,25 +102,45 @@ func TestLocalStager_Copy_GlobNoMatchSkipped(t *testing.T) {
 	}
 	defer cleanup()
 
-	entries := []preserve.Entry{
-		{Raw: "nowhere/**", IsGlob: true},
+	got := stager.FilesDir()
+	want := filepath.Join(dir, "files")
+	if got != want {
+		t.Errorf("FilesDir() = %q, want %q", got, want)
 	}
-	expander := preserve.Expander{FS: copyFS()}
-	if err := stager.Copy(nil, entries, expander); err != nil {
-		t.Fatalf("Copy error on no-match glob: %v", err)
-	}
+}
 
-	// Expect zero files copied (glob had no matches, treated as warning).
-	preserveDir := filepath.Join(dir, "preserve")
-	var count int
-	_ = filepath.WalkDir(preserveDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		count++
-		return nil
-	})
-	if count != 0 {
-		t.Errorf("copied files = %d, want 0 (no-match glob skipped)", count)
+// TestLocalStager_FilesDir_NotPrepared verifies FilesDir returns empty when
+// Prepare was not called.
+func TestLocalStager_FilesDir_NotPrepared(t *testing.T) {
+	stager := LocalStager{Root: t.TempDir(), ContainerID: "c4"}
+	if got := stager.FilesDir(); got != "" {
+		t.Errorf("FilesDir() before Prepare = %q, want empty", got)
+	}
+}
+
+// TestLocalStager_BunkerYAMLPath verifies BunkerYAMLPath returns the path to
+// bunker.yaml at the staging dir root.
+func TestLocalStager_BunkerYAMLPath(t *testing.T) {
+	root := t.TempDir()
+	stager := LocalStager{Root: root, ContainerID: "c5"}
+	dir, cleanup, err := stager.Prepare()
+	if err != nil {
+		t.Fatalf("Prepare error: %v", err)
+	}
+	defer cleanup()
+
+	got := stager.BunkerYAMLPath()
+	want := filepath.Join(dir, "bunker.yaml")
+	if got != want {
+		t.Errorf("BunkerYAMLPath() = %q, want %q", got, want)
+	}
+}
+
+// TestLocalStager_BunkerYAMLPath_NotPrepared triangulates: BunkerYAMLPath
+// returns empty when Prepare was not called.
+func TestLocalStager_BunkerYAMLPath_NotPrepared(t *testing.T) {
+	stager := LocalStager{Root: t.TempDir(), ContainerID: "c6"}
+	if got := stager.BunkerYAMLPath(); got != "" {
+		t.Errorf("BunkerYAMLPath() before Prepare = %q, want empty", got)
 	}
 }
