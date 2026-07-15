@@ -137,7 +137,8 @@ func TestValidate_RequiredFields(t *testing.T) {
 }
 
 // TestDefaultIgnoreList_Contents verifies REQ-COPY-4: the default ignore list
-// MUST contain exactly the 14 specified patterns, in order, with no duplicates.
+// MUST contain exactly the 15 specified patterns (the 14 originals plus "/tmp"),
+// in order, with no duplicates.
 func TestDefaultIgnoreList_Contents(t *testing.T) {
 	got := DefaultIgnoreList()
 	want := []string{
@@ -155,9 +156,10 @@ func TestDefaultIgnoreList_Contents(t *testing.T) {
 		"venv",
 		"*.log",
 		"*.tmp",
+		"/tmp",
 	}
-	if len(got) != 14 {
-		t.Fatalf("DefaultIgnoreList len = %d, want 14", len(got))
+	if len(got) != 15 {
+		t.Fatalf("DefaultIgnoreList len = %d, want 15", len(got))
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("DefaultIgnoreList = %v\nwant           = %v", got, want)

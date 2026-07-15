@@ -12,6 +12,8 @@ import (
 	"fmt"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/blak0p/bunkerctl/internal/ignore"
 )
 
 // currentFormatVersion is the only schema generation this package produces and
@@ -161,31 +163,10 @@ func Unmarshal(data []byte) (*BunkerManifest, error) {
 	return &m, nil
 }
 
-// defaultIgnorePatterns is the fixed list from REQ-COPY-4. It is kept as a
-// package-level slice so DefaultIgnoreList can return a fresh copy each call,
-// preventing callers from mutating the shared default.
-var defaultIgnorePatterns = []string{
-	".cache",
-	"node_modules",
-	"target",
-	".cargo/registry",
-	".npm",
-	".next",
-	".git",
-	"Downloads",
-	".local/share/Trash",
-	"__pycache__",
-	".venv",
-	"venv",
-	"*.log",
-	"*.tmp",
-}
-
-// DefaultIgnoreList returns a copy of the 14 default ignore patterns
-// (REQ-COPY-4). Callers may freely mutate the returned slice without affecting
-// the package default.
+// DefaultIgnoreList returns a copy of the default ignore patterns (REQ-COPY-4).
+// It delegates to ignore.DefaultPatterns so the default list has a single
+// source of truth; callers may freely mutate the returned slice without
+// affecting the shared default.
 func DefaultIgnoreList() []string {
-	out := make([]string, len(defaultIgnorePatterns))
-	copy(out, defaultIgnorePatterns)
-	return out
+	return ignore.DefaultPatterns()
 }

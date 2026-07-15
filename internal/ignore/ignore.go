@@ -15,6 +15,11 @@ import (
 // defaultPatterns is the fixed REQ-COPY-4 list. Kept as a package-level value so
 // DefaultPatterns can return a fresh copy, preventing callers from mutating the
 // shared default.
+//
+// "/tmp" is intentionally last: it is an absolute-path pattern (the only one in
+// the list) and is grouped after the relative-path/glob defaults to keep the
+// user-facing defaults readable. Container-side temp files live under /tmp and
+// must never be copied into a .bunker archive.
 var defaultPatterns = []string{
 	".cache",
 	"node_modules",
@@ -30,9 +35,10 @@ var defaultPatterns = []string{
 	"venv",
 	"*.log",
 	"*.tmp",
+	"/tmp",
 }
 
-// DefaultPatterns returns a copy of the 14 default ignore patterns (REQ-COPY-4).
+// DefaultPatterns returns a copy of the 15 default ignore patterns (REQ-COPY-4).
 // The returned slice is safe to mutate without affecting the package default.
 func DefaultPatterns() []string {
 	out := make([]string, len(defaultPatterns))

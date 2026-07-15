@@ -6,7 +6,8 @@ import (
 )
 
 // TestDefaultPatterns_Contents verifies REQ-COPY-4: DefaultPatterns returns
-// exactly the 14 specified patterns, in order, with no duplicates.
+// exactly the 15 specified patterns (the 14 originals plus "/tmp"), in order,
+// with no duplicates.
 func TestDefaultPatterns_Contents(t *testing.T) {
 	got := DefaultPatterns()
 	want := []string{
@@ -24,9 +25,10 @@ func TestDefaultPatterns_Contents(t *testing.T) {
 		"venv",
 		"*.log",
 		"*.tmp",
+		"/tmp",
 	}
-	if len(got) != 14 {
-		t.Fatalf("DefaultPatterns len = %d, want 14", len(got))
+	if len(got) != 15 {
+		t.Fatalf("DefaultPatterns len = %d, want 15", len(got))
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("DefaultPatterns = %v\nwant            = %v", got, want)
