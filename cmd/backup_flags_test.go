@@ -8,109 +8,38 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blak0p/bunkerctl/internal/copy"
 	"github.com/blak0p/bunkerctl/internal/podman"
 )
 
-// TestBackup_FormatFlag_InvalidValue is a RED test (Slice 7): `bunkerctl backup
-// --format=gzip mybunker` MUST exit non-zero and the error MUST mention an
-// invalid format referencing the allowed values (docker-archive / oci-archive).
-// Before PR 5 there is no --format flag, so cobra would error on an unknown
-// flag; once the flag exists it must validate the value and fail with a clear
-// message. Either way, non-zero exit + mention of the format error is the
-// observable behavior we assert.
-func TestBackup_FormatFlag_InvalidValue(t *testing.T) {
-	setSafeBackupDefaults(t)
-	setBackupRunner(t, &podman.FakeRunner{
-		VersionStr:    "podman version 5.0.0",
-		InspectResult: podman.InspectResult{ID: "mybunker", Image: "fedora:40"},
-	})
-
-	out, err := executeBackup(t, "--format=gzip", "mybunker")
-	if err == nil {
-		t.Fatalf("backup --format=gzip returned nil error, want non-nil")
-	}
-	low := strings.ToLower(out)
-	if !strings.Contains(low, "invalid") || !strings.Contains(low, "format") {
-		t.Errorf("output = %q, want substring mentioning 'invalid' and 'format'", out)
-	}
-}
-
-// TestBackup_FormatFlag_OciArchive triangulates (GREEN): `bunkerctl backup
-// --format=oci-archive mybunker` with a valid container MUST succeed and the
-// Save call MUST be invoked with format "oci-archive". This proves the flag
-// value flows through the backupFormat seam into the archive producer.
-func TestBackup_FormatFlag_OciArchive(t *testing.T) {
-	setSafeBackupDefaults(t)
-	destDir := t.TempDir()
-	setBackupDestPath(t, filepath.Join(destDir, "bunker-oci.bunker"))
-
-	r := &podman.FakeRunner{
-		VersionStr:    "podman version 5.0.0",
-		InspectResult: podman.InspectResult{ID: "mybunker", Image: "fedora:40"},
-		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
-			return "", errFakeNonZero // no managers
-		},
-	}
-	setBackupRunner(t, r)
-
-	if _, err := executeBackup(t, "--format=oci-archive", "mybunker"); err != nil {
-		t.Fatalf("backup --format=oci-archive error: %v", err)
-	}
-	// FakeRunner.SaveCalls must record the format. This is the production
-	// behavior the test drives: the --format flag value reaches Save.
-	if len(r.SaveCalls) != 1 {
-		t.Fatalf("SaveCalls = %d, want 1 (got %+v)", len(r.SaveCalls), r.SaveCalls)
-	}
-	if r.SaveCalls[0].Format != "oci-archive" {
-		t.Errorf("SaveCalls[0].Format = %q, want %q", r.SaveCalls[0].Format, "oci-archive")
-	}
-}
-
-// TestBackup_FormatFlag_DockerArchiveDefault triangulates: with --format
-// omitted (default) the Save call uses docker-archive; with
-// --format=docker-archive explicit, the same.
-func TestBackup_FormatFlag_DockerArchiveDefault(t *testing.T) {
-	setSafeBackupDefaults(t)
-	// Override the dest seam to point into a temp dir.
-	destDir := t.TempDir()
-	setBackupDestPath(t, filepath.Join(destDir, "bunker-default.bunker"))
-
-	r := &podman.FakeRunner{
-		VersionStr:    "podman version 5.0.0",
-		InspectResult: podman.InspectResult{ID: "defbunker", Image: "fedora:40"},
-		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
-			return "", errFakeNonZero
-		},
-	}
-	setBackupRunner(t, r)
-
-	if _, err := executeBackup(t, "defbunker"); err != nil {
-		t.Fatalf("backup defbunker (default format) error: %v", err)
-	}
-	if len(r.SaveCalls) != 1 || r.SaveCalls[0].Format != "docker-archive" {
-		t.Errorf("SaveCalls = %+v, want one with Format docker-archive", r.SaveCalls)
-	}
-}
-
-// TestBackup_OutputFlag_WritesToPath is a RED test (Slice 7): `bunkerctl backup
+// TestBackup_OutputFlag_WritesToPath verifies REQ-CLI-3: `bunkerctl backup
 // --output=/tmp/foo.bunker mybunker` MUST succeed and the .bunker file MUST
-// appear at exactly that path. Before PR 5 the --output flag does not exist.
+// appear at exactly that path.
 func TestBackup_OutputFlag_WritesToPath(t *testing.T) {
 	setSafeBackupDefaults(t)
-	// Do NOT call setBackupDestPath: we want the --output flag to control the
-	// dest path. setSafeBackupDefaults sets a safe dest, but the flag must
-	// override it.
 	outDir := t.TempDir()
 	dest := filepath.Join(outDir, "custom.bunker")
 
-	r := &podman.FakeRunner{
-		VersionStr:    "podman version 5.0.0",
-		InspectResult: podman.InspectResult{ID: "mybunker", Image: "fedora:40"},
+	setBackupRunner(t, &podman.FakeRunner{
+		VersionStr:       "podman version 5.0.0",
+		InspectResult:    podman.InspectResult{ID: "mybunker", Image: "fedora:45"},
+		InspectRawResult: `[{"Id":"mybunker","Image":"fedora:45","Config":{"User":"1000"},"State":{"Running":true}}]`,
 		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
-			return "", errFakeNonZero
+			switch strings.Join(cmd, " ") {
+			case "getent passwd 1000":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "getent passwd":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "cat /etc/os-release":
+				return "ID=fedora\nVERSION_ID=45\n", nil
+			case "which dnf5", "which dnf":
+				return "", nil
+			case "dnf5 list installed", "dnf list installed":
+				return "Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n", nil
+			}
+			return "", nil
 		},
-	}
-	setBackupRunner(t, r)
+	})
 
 	out, err := executeBackup(t, "--output="+dest, "mybunker")
 	if err != nil {
@@ -125,20 +54,31 @@ func TestBackup_OutputFlag_WritesToPath(t *testing.T) {
 }
 
 // TestBackup_OutputFlag_MissingParentDir triangulates: --output pointing at a
-// path whose parent directory does not exist MUST fail with a clear error. We
-// do NOT auto-mkdir; the user must fix the path.
+// path whose parent directory does not exist MUST fail with a clear error.
 func TestBackup_OutputFlag_MissingParentDir(t *testing.T) {
 	setSafeBackupDefaults(t)
 	missing := filepath.Join(t.TempDir(), "does", "not", "exist", "out.bunker")
 
-	r := &podman.FakeRunner{
-		VersionStr:    "podman version 5.0.0",
-		InspectResult: podman.InspectResult{ID: "mybunker", Image: "fedora:40"},
+	setBackupRunner(t, &podman.FakeRunner{
+		VersionStr:       "podman version 5.0.0",
+		InspectResult:    podman.InspectResult{ID: "mybunker", Image: "fedora:45"},
+		InspectRawResult: `[{"Id":"mybunker","Image":"fedora:45","Config":{"User":"1000"},"State":{"Running":true}}]`,
 		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
-			return "", errFakeNonZero
+			switch strings.Join(cmd, " ") {
+			case "getent passwd 1000":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "getent passwd":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "cat /etc/os-release":
+				return "ID=fedora\nVERSION_ID=45\n", nil
+			case "which dnf5", "which dnf":
+				return "", nil
+			case "dnf5 list installed", "dnf list installed":
+				return "Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n", nil
+			}
+			return "", nil
 		},
-	}
-	setBackupRunner(t, r)
+	})
 
 	out, err := executeBackup(t, "--output="+missing, "mybunker")
 	if err == nil {
@@ -149,9 +89,94 @@ func TestBackup_OutputFlag_MissingParentDir(t *testing.T) {
 	}
 }
 
-// TestBackup_Help_ListsFlags is a RED test (Slice 7): `bunkerctl backup --help`
-// MUST list both --format and --output flags with their defaults.
-func TestBackup_Help_ListsFlags(t *testing.T) {
+// TestBackup_NoEditFlag_SkipsEditor verifies REQ-CLI-4/REQ-EDIT-3: with
+// --no-edit, the editor step is skipped and the backup completes without
+// invoking $EDITOR. We assert by setting a fake editor that would fail the
+// pipeline if invoked.
+func TestBackup_NoEditFlag_SkipsEditor(t *testing.T) {
+	setSafeBackupDefaults(t)
+	// Inject an editor that, if invoked, aborts the backup.
+	setBackupEditor(t, failingEditor{})
+
+	setBackupRunner(t, &podman.FakeRunner{
+		VersionStr:       "podman version 5.0.0",
+		InspectResult:    podman.InspectResult{ID: "mybunker", Image: "fedora:45"},
+		InspectRawResult: `[{"Id":"mybunker","Image":"fedora:45","Config":{"User":"1000"},"State":{"Running":true}}]`,
+		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
+			switch strings.Join(cmd, " ") {
+			case "getent passwd 1000":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "getent passwd":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "cat /etc/os-release":
+				return "ID=fedora\nVERSION_ID=45\n", nil
+			case "which dnf5", "which dnf":
+				return "", nil
+			case "dnf5 list installed", "dnf list installed":
+				return "Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n", nil
+			}
+			return "", nil
+		},
+	})
+
+	out, err := executeBackup(t, "--no-edit", "mybunker")
+	if err != nil {
+		t.Fatalf("backup --no-edit error: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "backup created:") {
+		t.Errorf("output = %q, want substring 'backup created:'", out)
+	}
+}
+
+// TestBackup_IgnoreExtraFlag_AddsPatterns verifies REQ-CLI-5:
+// --ignore-extra=build,dist adds those patterns to the effective ignore list.
+// We capture the ignore list the Copier received via a capturing copier.
+func TestBackup_IgnoreExtraFlag_AddsPatterns(t *testing.T) {
+	setSafeBackupDefaults(t)
+	cap := &capturingCopier{}
+	setBackupCopier(t, cap)
+
+	setBackupRunner(t, &podman.FakeRunner{
+		VersionStr:       "podman version 5.0.0",
+		InspectResult:    podman.InspectResult{ID: "mybunker", Image: "fedora:45"},
+		InspectRawResult: `[{"Id":"mybunker","Image":"fedora:45","Config":{"User":"1000"},"State":{"Running":true}}]`,
+		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
+			switch strings.Join(cmd, " ") {
+			case "getent passwd 1000":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "getent passwd":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "cat /etc/os-release":
+				return "ID=fedora\nVERSION_ID=45\n", nil
+			case "which dnf5", "which dnf":
+				return "", nil
+			case "dnf5 list installed", "dnf list installed":
+				return "Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n", nil
+			}
+			return "", nil
+		},
+	})
+
+	if _, err := executeBackup(t, "--no-edit", "--ignore-extra=build,dist", "mybunker"); err != nil {
+		t.Fatalf("backup --ignore-extra error: %v", err)
+	}
+	if !cap.called {
+		t.Fatalf("Copier not invoked")
+	}
+	if !containsString(cap.lastOpts.Ignore, "build") || !containsString(cap.lastOpts.Ignore, "dist") {
+		t.Errorf("effective ignore list = %v, want to contain build and dist", cap.lastOpts.Ignore)
+	}
+	// Defaults must still be present alongside the extras.
+	for _, d := range []string{".cache", "node_modules", "*.log"} {
+		if !containsString(cap.lastOpts.Ignore, d) {
+			t.Errorf("default %q missing from effective ignore list %v", d, cap.lastOpts.Ignore)
+		}
+	}
+}
+
+// TestBackup_Help_ListsNewFlags verifies `bunkerctl backup --help` lists the new
+// flags (--output, --no-edit, --ignore-extra) and NOT the removed --format.
+func TestBackup_Help_ListsNewFlags(t *testing.T) {
 	resetRoot()
 	resetBackupFlags()
 	buf := new(bytes.Buffer)
@@ -165,19 +190,18 @@ func TestBackup_Help_ListsFlags(t *testing.T) {
 		t.Fatalf("backup --help error: %v", err)
 	}
 	got := buf.String()
-	if !strings.Contains(got, "--format") {
-		t.Errorf("help output missing --format flag; got %q", got)
+	for _, want := range []string{"--output", "--no-edit", "--ignore-extra"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("help output missing %q; got %q", want, got)
+		}
 	}
-	if !strings.Contains(got, "docker-archive") {
-		t.Errorf("help output missing default format docker-archive; got %q", got)
-	}
-	if !strings.Contains(got, "--output") {
-		t.Errorf("help output missing --output flag; got %q", got)
+	if strings.Contains(got, "--format") {
+		t.Errorf("help output still lists removed --format; got %q", got)
 	}
 }
 
 // TestBackup_Help_LongDescription triangulates: the --help output MUST contain
-// the new Long description summarizing what the backup does.
+// the Long description.
 func TestBackup_Help_LongDescription(t *testing.T) {
 	resetRoot()
 	resetBackupFlags()
@@ -192,10 +216,35 @@ func TestBackup_Help_LongDescription(t *testing.T) {
 		t.Fatalf("backup --help error: %v", err)
 	}
 	got := buf.String()
-	if !strings.Contains(got, "portable") {
-		t.Errorf("help output missing Long description (word 'portable'); got %q", got)
+	if !strings.Contains(got, "bunker.yaml") {
+		t.Errorf("help output missing Long description (word 'bunker.yaml'); got %q", got)
 	}
-	if !strings.Contains(got, "Examples") && !strings.Contains(got, "Example") {
-		t.Errorf("help output missing Examples block; got %q", got)
+}
+
+// failingEditor is a curate.Editor that always returns exit code 1; used to
+// prove --no-edit skips the editor (if the editor ran, the backup would abort).
+type failingEditor struct{}
+
+func (failingEditor) Edit(path string) (int, error) { return 1, nil }
+
+// capturingCopier records the CopyOptions it received.
+type capturingCopier struct {
+	called   bool
+	lastOpts copy.CopyOptions
+}
+
+func (c *capturingCopier) Copy(ctx context.Context, runner podman.Runner, containerID string, opts copy.CopyOptions) (copy.CopyResult, error) {
+	c.called = true
+	c.lastOpts = opts
+	return copy.CopyResult{}, nil
+}
+
+// containsString is a tiny helper for slice membership.
+func containsString(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
 	}
+	return false
 }

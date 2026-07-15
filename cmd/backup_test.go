@@ -3,7 +3,6 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -11,7 +10,7 @@ import (
 )
 
 // TestBackupCommand_Registered asserts the backup command is attached to the
-// root command (its parent is rootCmd). Carried over from PR 1.
+// root command (its parent is rootCmd).
 func TestBackupCommand_Registered(t *testing.T) {
 	if backupCmd.Parent() != rootCmd {
 		t.Errorf("backupCmd.Parent() = %v, want rootCmd", backupCmd.Parent())
@@ -19,8 +18,7 @@ func TestBackupCommand_Registered(t *testing.T) {
 }
 
 // TestBackupCommand_Use triangulates: the registered command's Use string is
-// "backup [name]" (PR 5 UX polish: optional name shown in usage), proving the
-// right command was wired. Carried over from PR 1, updated in PR 5.
+// "backup [name]", proving the right command was wired.
 func TestBackupCommand_Use(t *testing.T) {
 	if backupCmd.Use != "backup [name]" {
 		t.Errorf("backupCmd.Use = %q, want %q", backupCmd.Use, "backup [name]")
@@ -30,14 +28,8 @@ func TestBackupCommand_Use(t *testing.T) {
 	}
 }
 
-// The PR 1 placeholder test (TestBackupCommand_NotYetImplemented) was removed
-// in PR 2: backup now has real engine-check + selection behavior, superseding
-// the "not yet implemented" output. The TestBackup_* tests below cover the new
-// behavior.
-
 // setBackupRunner swaps the package-level Runner used by the backup command
-// for a fake, and restores the original on cleanup. This is the test seam that
-// lets cmd tests drive the backup pipeline without a real Podman engine.
+// for a fake, and restores the original on cleanup.
 func setBackupRunner(t *testing.T, r podman.Runner) {
 	t.Helper()
 	orig := backupRunner
@@ -62,9 +54,9 @@ func executeBackup(t *testing.T, args ...string) (string, error) {
 	return buf.String(), err
 }
 
-// TestBackup_EngineUnavailable verifies the deferred Slice-1 behavior: when
-// the engine is unreachable (Version returns ErrEngineUnavailable), backup
-// MUST fail fast with a clear message and a non-zero exit, no panic.
+// TestBackup_EngineUnavailable verifies: when the engine is unreachable (Version
+// returns ErrEngineUnavailable), backup MUST fail fast with a clear message and
+// a non-zero exit, no panic.
 func TestBackup_EngineUnavailable(t *testing.T) {
 	setBackupRunner(t, &podman.FakeRunner{Err: podman.ErrEngineUnavailable})
 	out, err := executeBackup(t)
@@ -76,9 +68,9 @@ func TestBackup_EngineUnavailable(t *testing.T) {
 	}
 }
 
-// TestBackup_EngineAvailable_NoArg_InteractiveSelection verifies the Slice-2
+// TestBackup_EngineAvailable_NoArg_InteractiveSelection verifies the
 // interactive chooser: with no positional arg and a fake container list,
-// feeding stdin "2\n" selects the second container and prints "selected".
+// feeding stdin "2\n" selects the second container and runs the pipeline.
 func TestBackup_EngineAvailable_NoArg_InteractiveSelection(t *testing.T) {
 	setSafeBackupDefaults(t)
 	containers := []podman.Container{
@@ -87,47 +79,73 @@ func TestBackup_EngineAvailable_NoArg_InteractiveSelection(t *testing.T) {
 		{ID: "id3", Names: []string{"c3"}, Image: "img3", Status: "running"},
 	}
 	setBackupRunner(t, &podman.FakeRunner{
-		VersionStr:    "podman version 5.0.0",
-		ListResult:    containers,
-		InspectResult: podman.InspectResult{ID: "id2", Image: "img2"},
+		VersionStr:       "podman version 5.0.0",
+		ListResult:       containers,
+		InspectResult:    podman.InspectResult{ID: "id2", Image: "img2"},
+		InspectRawResult: `[{"Id":"id2","Image":"img2","Config":{"User":"1000"},"State":{"Running":true}}]`,
+		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
+			switch joined := strings.Join(cmd, " "); joined {
+			case "getent passwd 1000":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "getent passwd":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "cat /etc/os-release":
+				return "ID=fedora\nVERSION_ID=45\n", nil
+			case "which dnf5", "which dnf":
+				return "", nil
+			case "dnf5 list installed", "dnf list installed":
+				return "Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n", nil
+			}
+			return "", nil
+		},
 	})
-	// Wire stdin so the interactive chooser reads "2\n".
-	resetRoot()
 	rootCmd.SetIn(strings.NewReader("2\n"))
 	out, err := executeBackup(t)
 	if err != nil {
-		t.Fatalf("backup interactive returned error: %v", err)
+		t.Fatalf("backup interactive returned error: %v\noutput: %s", err, out)
 	}
 	if !strings.Contains(out, "c2") {
 		t.Errorf("output = %q, want substring 'c2' (selected container)", out)
 	}
-	// PR 3: the pipeline now proceeds past selection into staging. The old
-	// "selected:" placeholder was replaced by "staged N files". Assert the
-	// container name still appears and staging ran.
-	if !strings.Contains(out, "staged 0 files") {
-		t.Errorf("output = %q, want substring 'staged 0 files'", out)
+	if !strings.Contains(out, "backup created:") {
+		t.Errorf("output = %q, want substring 'backup created:'", out)
 	}
 }
 
-// TestBackup_ExplicitName_SelectsDirectly verifies Slice-2 explicit-arg
-// selection: `bunkerctl backup mybunker` with the engine OK and the container
-// found MUST exit 0 and mention the container name + "selected".
+// TestBackup_ExplicitName_SelectsDirectly verifies explicit-arg selection:
+// `bunkerctl backup mybunker` with the engine OK and the container found MUST
+// exit 0 and run the pipeline through to "backup created:".
 func TestBackup_ExplicitName_SelectsDirectly(t *testing.T) {
 	setSafeBackupDefaults(t)
 	setBackupRunner(t, &podman.FakeRunner{
-		VersionStr:    "podman version 5.0.0",
-		InspectResult: podman.InspectResult{ID: "mybunker", Image: "fedora:40"},
+		VersionStr:       "podman version 5.0.0",
+		InspectResult:    podman.InspectResult{ID: "mybunker", Image: "fedora:45"},
+		InspectRawResult: `[{"Id":"mybunker","Image":"fedora:45","Config":{"User":"1000"},"State":{"Running":true}}]`,
+		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
+			switch strings.Join(cmd, " ") {
+			case "getent passwd 1000":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "getent passwd":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "cat /etc/os-release":
+				return "ID=fedora\nVERSION_ID=45\n", nil
+			case "which dnf5", "which dnf":
+				return "", nil
+			case "dnf5 list installed", "dnf list installed":
+				return "Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n", nil
+			}
+			return "", nil
+		},
 	})
 	out, err := executeBackup(t, "mybunker")
 	if err != nil {
-		t.Fatalf("backup mybunker returned error: %v", err)
+		t.Fatalf("backup mybunker returned error: %v\noutput: %s", err, out)
 	}
 	if !strings.Contains(out, "mybunker") {
 		t.Errorf("output = %q, want substring 'mybunker'", out)
 	}
-	// PR 3: selection placeholder replaced by staging output.
-	if !strings.Contains(out, "staged 0 files") {
-		t.Errorf("output = %q, want substring 'staged 0 files'", out)
+	if !strings.Contains(out, "backup created:") {
+		t.Errorf("output = %q, want substring 'backup created:'", out)
 	}
 }
 
@@ -135,8 +153,9 @@ func TestBackup_ExplicitName_SelectsDirectly(t *testing.T) {
 // reports as not found MUST exit non-zero and print "not found".
 func TestBackup_NotFound(t *testing.T) {
 	setBackupRunner(t, &podman.FakeRunner{
-		VersionStr: "podman version 5.0.0",
-		InspectErr: podman.ErrContainerNotFound,
+		VersionStr:    "podman version 5.0.0",
+		InspectErr:    podman.ErrContainerNotFound,
+		InspectRawErr: podman.ErrContainerNotFound,
 	})
 	out, err := executeBackup(t, "nonexistent")
 	if err == nil {
@@ -148,12 +167,10 @@ func TestBackup_NotFound(t *testing.T) {
 }
 
 // TestBackup_InvalidName_EndToEnd triangulates the threat matrix end-to-end:
-// a shell-injection attempt passed as a positional arg MUST be rejected at
-// the backup command level and exit non-zero with "invalid container name".
+// a shell-injection attempt passed as a positional arg MUST be rejected at the
+// backup command level and exit non-zero with "invalid container name".
 func TestBackup_InvalidName_EndToEnd(t *testing.T) {
-	setBackupRunner(t, &podman.FakeRunner{
-		VersionStr: "podman version 5.0.0",
-	})
+	setBackupRunner(t, &podman.FakeRunner{VersionStr: "podman version 5.0.0"})
 	out, err := executeBackup(t, "foo;rm -rf /")
 	if err == nil {
 		t.Fatalf("backup with injection returned nil error, want non-nil")
@@ -183,9 +200,7 @@ func TestBackup_NoArg_EmptyList(t *testing.T) {
 // TestBackup_InvalidName_DifferentChar triangulates the threat matrix with a
 // different injection character to prove validation is general.
 func TestBackup_InvalidName_DifferentChar(t *testing.T) {
-	setBackupRunner(t, &podman.FakeRunner{
-		VersionStr: "podman version 5.0.0",
-	})
+	setBackupRunner(t, &podman.FakeRunner{VersionStr: "podman version 5.0.0"})
 	out, err := executeBackup(t, "foo`whoami`")
 	if err == nil {
 		t.Fatalf("backup with backtick injection returned nil error, want non-nil")
@@ -201,25 +216,34 @@ func TestBackup_InvalidName_DifferentChar(t *testing.T) {
 func TestBackup_EngineAvailable_TriangulateVersion(t *testing.T) {
 	setSafeBackupDefaults(t)
 	setBackupRunner(t, &podman.FakeRunner{
-		VersionStr:    "podman version 4.9.9",
-		InspectResult: podman.InspectResult{ID: "devbox", Image: "ubuntu:24.04"},
+		VersionStr:       "podman version 4.9.9",
+		InspectResult:    podman.InspectResult{ID: "devbox", Image: "fedora:45"},
+		InspectRawResult: `[{"Id":"devbox","Image":"fedora:45","Config":{"User":"1000"},"State":{"Running":true}}]`,
+		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
+			switch strings.Join(cmd, " ") {
+			case "getent passwd 1000":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "getent passwd":
+				return "alejndro:x:1000:1000::/home/alejndro:/bin/bash", nil
+			case "cat /etc/os-release":
+				return "ID=fedora\nVERSION_ID=45\n", nil
+			case "which dnf5", "which dnf":
+				return "", nil
+			case "dnf5 list installed", "dnf list installed":
+				return "Installed Packages\nfish.x86_64 3.7.0-1.fc40 @repo\n", nil
+			}
+			return "", nil
+		},
 	})
 	out, err := executeBackup(t, "devbox")
 	if err != nil {
-		t.Fatalf("backup devbox returned error: %v", err)
+		t.Fatalf("backup devbox returned error: %v\noutput: %s", err, out)
 	}
 	if !strings.Contains(out, "devbox") {
 		t.Errorf("output = %q, want substring 'devbox'", out)
 	}
-	// PR 3: the engine-OK happy path now proceeds to staging. Assert no
-	// engine-ERROR message leaked. We check only the first meaningful line
-	// (staging summary) to avoid false positives from temp-path test names.
 	firstLine := strings.SplitN(out, "\n", 2)[0]
 	if strings.Contains(strings.ToLower(firstLine), "engine") {
 		t.Errorf("happy path first line mentions engine unexpectedly: %q", firstLine)
 	}
 }
-
-// Suppress unused-import linter if errors.Is is not directly used in later
-// edits; kept here to mirror PR 1 import style.
-var _ = errors.Is
