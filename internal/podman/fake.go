@@ -2,6 +2,19 @@ package podman
 
 import "context"
 
+// CreateCall records a single FakeRunner.Create invocation.
+type CreateCall struct {
+	Image string
+	Name  string
+	Env   []string
+}
+
+// CpCall records a single FakeRunner.Cp invocation.
+type CpCall struct {
+	Src string
+	Dst string
+}
+
 // FakeRunner is an exported test double implementing Runner. It lives in a
 // non-test file so that cross-package tests (e.g. cmd) can drive the backup
 // command against a controlled Podman without a real engine. It is not
@@ -29,6 +42,31 @@ type FakeRunner struct {
 	InspectRawFn     func(ctx context.Context, id string) (string, error)
 	InspectRawResult string
 	InspectRawErr    error
+
+	// CreateErr, when non-nil, is returned by Create. CreateCalls records
+	// each invocation with its image, name, and env args.
+	CreateErr  error
+	CreateCalls []CreateCall
+
+	// StartErr, when non-nil, is returned by Start. StartCalls records each
+	// container name passed.
+	StartErr  error
+	StartCalls []string
+
+	// CpErr, when non-nil, is returned by Cp. CpCalls records each (src,dst)
+	// pair passed.
+	CpErr  error
+	CpCalls []CpCall
+
+	// PullErr, when non-nil, is returned by Pull. PullCalls records each
+	// image passed.
+	PullErr  error
+	PullCalls []string
+
+	// RemoveErr, when non-nil, is returned by Remove. RemoveCalls records
+	// each container name passed.
+	RemoveErr  error
+	RemoveCalls []string
 
 	// Calls records invocations for assertion.
 	Calls []string
@@ -66,4 +104,40 @@ func (f *FakeRunner) InspectRaw(ctx context.Context, id string) (string, error) 
 		return f.InspectRawFn(ctx, id)
 	}
 	return f.InspectRawResult, f.InspectRawErr
+}
+
+// Create records the call and returns the configured error (nil by default).
+func (f *FakeRunner) Create(ctx context.Context, image, name string, env []string) error {
+	f.Calls = append(f.Calls, "Create:"+name)
+	envCopy := append([]string{}, env...)
+	f.CreateCalls = append(f.CreateCalls, CreateCall{Image: image, Name: name, Env: envCopy})
+	return f.CreateErr
+}
+
+// Start records the container name and returns the configured error.
+func (f *FakeRunner) Start(ctx context.Context, name string) error {
+	f.Calls = append(f.Calls, "Start:"+name)
+	f.StartCalls = append(f.StartCalls, name)
+	return f.StartErr
+}
+
+// Cp records the (src,dst) pair and returns the configured error.
+func (f *FakeRunner) Cp(ctx context.Context, src, dst string) error {
+	f.Calls = append(f.Calls, "Cp:"+src+" "+dst)
+	f.CpCalls = append(f.CpCalls, CpCall{Src: src, Dst: dst})
+	return f.CpErr
+}
+
+// Pull records the image and returns the configured error.
+func (f *FakeRunner) Pull(ctx context.Context, image string) error {
+	f.Calls = append(f.Calls, "Pull:"+image)
+	f.PullCalls = append(f.PullCalls, image)
+	return f.PullErr
+}
+
+// Remove records the container name and returns the configured error.
+func (f *FakeRunner) Remove(ctx context.Context, name string) error {
+	f.Calls = append(f.Calls, "Remove:"+name)
+	f.RemoveCalls = append(f.RemoveCalls, name)
+	return f.RemoveErr
 }

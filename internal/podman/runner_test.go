@@ -3,6 +3,7 @@ package podman
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -272,6 +273,440 @@ func TestFakeRunner_InspectRaw_ExecFnPassthrough(t *testing.T) {
 	}
 	if got != "custom" {
 		t.Errorf("InspectRaw = %q, want custom", got)
+	}
+}
+
+// --- restore-core PR 1: Create, Start, Cp, Pull, Remove ---
+//
+// Strict TDD: these tests are written FIRST and reference production methods
+// that do not exist yet on the Runner interface / CLIRunner / FakeRunner. The
+// expected RED state is a COMPILE ERROR (undefined method), not a runtime
+// assertion failure. GREEN adds the methods + doubles.
+
+// TestCLIRunner_Create_RunsPodmanCreateWithEnv is the happy-path RED anchor for
+// Create: it MUST run `podman create --env <v>... --name <name> <image>` and
+// surface the env vars in the exact order given.
+func TestCLIRunner_Create_RunsPodmanCreateWithEnv(t *testing.T) {
+	b := &argsBackend{out: ""}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Create(context.Background(), "fedora:45", "mybox", []string{"EDITOR=nvim"}); err != nil {
+		t.Fatalf("Create error: %v", err)
+	}
+	wantArgs := []string{"create", "--env", "EDITOR=nvim", "--name", "mybox", "fedora:45"}
+	if len(b.args) != len(wantArgs) {
+		t.Fatalf("Create args = %v, want %v", b.args, wantArgs)
+	}
+	for i, w := range wantArgs {
+		if b.args[i] != w {
+			t.Errorf("Create args[%d] = %q, want %q", i, b.args[i], w)
+		}
+	}
+}
+
+// TestCLIRunner_Create_NoEnvOmitsEnvFlag triangulates: when env is empty, no
+// --env flag is emitted (spec REQ-RST-4: empty env creates with no vars).
+func TestCLIRunner_Create_NoEnvOmitsEnvFlag(t *testing.T) {
+	b := &argsBackend{out: ""}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Create(context.Background(), "fedora:45", "mybox", nil); err != nil {
+		t.Fatalf("Create error: %v", err)
+	}
+	for _, a := range b.args {
+		if a == "--env" {
+			t.Errorf("Create(nil env) emitted --env; want no env flag, args=%v", b.args)
+		}
+	}
+	wantArgs := []string{"create", "--name", "mybox", "fedora:45"}
+	if len(b.args) != len(wantArgs) {
+		t.Fatalf("Create(no env) args = %v, want %v", b.args, wantArgs)
+	}
+	for i, w := range wantArgs {
+		if b.args[i] != w {
+			t.Errorf("Create(no env) args[%d] = %q, want %q", i, b.args[i], w)
+		}
+	}
+}
+
+// TestCLIRunner_Create_MultipleEnvFlags triangulates: multiple env vars each
+// get their own --env flag, in order.
+func TestCLIRunner_Create_MultipleEnvFlags(t *testing.T) {
+	b := &argsBackend{out: ""}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Create(context.Background(), "fedora:45", "mybox", []string{"EDITOR=nvim", "TERM=xterm"}); err != nil {
+		t.Fatalf("Create error: %v", err)
+	}
+	wantArgs := []string{"create", "--env", "EDITOR=nvim", "--env", "TERM=xterm", "--name", "mybox", "fedora:45"}
+	if len(b.args) != len(wantArgs) {
+		t.Fatalf("Create(multi env) args = %v, want %v", b.args, wantArgs)
+	}
+	for i, w := range wantArgs {
+		if b.args[i] != w {
+			t.Errorf("Create(multi env) args[%d] = %q, want %q", i, b.args[i], w)
+		}
+	}
+}
+
+// TestCLIRunner_Create_RejectsInvalidName asserts name validation fires before
+// the exec call (defense-in-depth).
+func TestCLIRunner_Create_RejectsInvalidName(t *testing.T) {
+	b := &argsBackend{}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Create(context.Background(), "fedora:45", "bad;name", nil); !errors.Is(err, ErrInvalidContainerName) {
+		t.Errorf("Create(bad;name) err = %v, want ErrInvalidContainerName", err)
+	}
+	if b.args != nil {
+		t.Errorf("Create(bad;name) spawned podman; want no exec call")
+	}
+}
+
+// TestCLIRunner_Create_PropagatesExecError asserts that when the exec backend
+// returns an error (e.g. name collision), Create surfaces it wrapped with
+// method context (spec: Container name collision fails).
+func TestCLIRunner_Create_PropagatesExecError(t *testing.T) {
+	b := &argsBackend{err: errors.New("exit status 125: name already in use")}
+	r := &CLIRunner{bin: "podman", exec: b}
+	err := r.Create(context.Background(), "fedora:45", "mybox", nil)
+	if err == nil {
+		t.Fatalf("Create(colliding name) err = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "create") {
+		t.Errorf("Create error = %v, want wrapped error mentioning create", err)
+	}
+}
+
+// TestCLIRunner_Start_RunsPodmanStart is the happy-path RED anchor for Start:
+// it MUST run `podman start <name>`.
+func TestCLIRunner_Start_RunsPodmanStart(t *testing.T) {
+	b := &argsBackend{out: ""}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Start(context.Background(), "mybox"); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	wantArgs := []string{"start", "mybox"}
+	if len(b.args) != len(wantArgs) {
+		t.Fatalf("Start args = %v, want %v", b.args, wantArgs)
+	}
+	for i, w := range wantArgs {
+		if b.args[i] != w {
+			t.Errorf("Start args[%d] = %q, want %q", i, b.args[i], w)
+		}
+	}
+}
+
+// TestCLIRunner_Start_RejectsInvalidName triangulates name validation.
+func TestCLIRunner_Start_RejectsInvalidName(t *testing.T) {
+	b := &argsBackend{}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Start(context.Background(), "bad;name"); !errors.Is(err, ErrInvalidContainerName) {
+		t.Errorf("Start(bad;name) err = %v, want ErrInvalidContainerName", err)
+	}
+	if b.args != nil {
+		t.Errorf("Start(bad;name) spawned podman; want no exec call")
+	}
+}
+
+// TestCLIRunner_Start_PropagatesExecError triangulates the error path.
+func TestCLIRunner_Start_PropagatesExecError(t *testing.T) {
+	b := &argsBackend{err: errors.New("exit status 1")}
+	r := &CLIRunner{bin: "podman", exec: b}
+	err := r.Start(context.Background(), "mybox")
+	if err == nil {
+		t.Fatalf("Start(backend error) err = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "start") {
+		t.Errorf("Start error = %v, want wrapped error mentioning start", err)
+	}
+}
+
+// TestCLIRunner_Cp_RunsPodmanCp is the happy-path RED anchor for Cp: it MUST
+// run `podman cp <src> <dst>`. Cp has no container name to validate.
+func TestCLIRunner_Cp_RunsPodmanCp(t *testing.T) {
+	b := &argsBackend{out: ""}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Cp(context.Background(), "/host/path/file", "mybox:/container/path"); err != nil {
+		t.Fatalf("Cp error: %v", err)
+	}
+	wantArgs := []string{"cp", "/host/path/file", "mybox:/container/path"}
+	if len(b.args) != len(wantArgs) {
+		t.Fatalf("Cp args = %v, want %v", b.args, wantArgs)
+	}
+	for i, w := range wantArgs {
+		if b.args[i] != w {
+			t.Errorf("Cp args[%d] = %q, want %q", i, b.args[i], w)
+		}
+	}
+}
+
+// TestCLIRunner_Cp_PropagatesExecError triangulates the error path.
+func TestCLIRunner_Cp_PropagatesExecError(t *testing.T) {
+	b := &argsBackend{err: errors.New("exit status 125")}
+	r := &CLIRunner{bin: "podman", exec: b}
+	err := r.Cp(context.Background(), "/missing", "mybox:/dst")
+	if err == nil {
+		t.Fatalf("Cp(backend error) err = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "cp") {
+		t.Errorf("Cp error = %v, want wrapped error mentioning cp", err)
+	}
+}
+
+// TestCLIRunner_Pull_RunsPodmanPull is the happy-path RED anchor for Pull: it
+// MUST run `podman pull <image>`. Pull has no container name to validate.
+func TestCLIRunner_Pull_RunsPodmanPull(t *testing.T) {
+	b := &argsBackend{out: ""}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Pull(context.Background(), "fedora:45"); err != nil {
+		t.Fatalf("Pull error: %v", err)
+	}
+	wantArgs := []string{"pull", "fedora:45"}
+	if len(b.args) != len(wantArgs) {
+		t.Fatalf("Pull args = %v, want %v", b.args, wantArgs)
+	}
+	for i, w := range wantArgs {
+		if b.args[i] != w {
+			t.Errorf("Pull args[%d] = %q, want %q", i, b.args[i], w)
+		}
+	}
+}
+
+// TestCLIRunner_Pull_PropagatesExecError triangulates the error path (spec:
+// Pull fails with clear error).
+func TestCLIRunner_Pull_PropagatesExecError(t *testing.T) {
+	b := &argsBackend{err: errors.New("exit status 125: image not found")}
+	r := &CLIRunner{bin: "podman", exec: b}
+	err := r.Pull(context.Background(), "fedora:45")
+	if err == nil {
+		t.Fatalf("Pull(backend error) err = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "pull") {
+		t.Errorf("Pull error = %v, want wrapped error mentioning pull", err)
+	}
+}
+
+// TestCLIRunner_Pull_DifferentImage triangulates with a different image to
+// force real arg construction (not a hardcoded value).
+func TestCLIRunner_Pull_DifferentImage(t *testing.T) {
+	b := &argsBackend{out: ""}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Pull(context.Background(), "ubuntu:24.04"); err != nil {
+		t.Fatalf("Pull error: %v", err)
+	}
+	if len(b.args) != 2 || b.args[1] != "ubuntu:24.04" {
+		t.Errorf("Pull(ubuntu:24.04) args = %v, want [pull ubuntu:24.04]", b.args)
+	}
+}
+
+// TestCLIRunner_Remove_RunsPodmanRemove is the happy-path RED anchor for
+// Remove: it MUST run `podman rm <name>`.
+func TestCLIRunner_Remove_RunsPodmanRemove(t *testing.T) {
+	b := &argsBackend{out: ""}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Remove(context.Background(), "mybox"); err != nil {
+		t.Fatalf("Remove error: %v", err)
+	}
+	wantArgs := []string{"rm", "mybox"}
+	if len(b.args) != len(wantArgs) {
+		t.Fatalf("Remove args = %v, want %v", b.args, wantArgs)
+	}
+	for i, w := range wantArgs {
+		if b.args[i] != w {
+			t.Errorf("Remove args[%d] = %q, want %q", i, b.args[i], w)
+		}
+	}
+}
+
+// TestCLIRunner_Remove_RejectsInvalidName triangulates name validation.
+func TestCLIRunner_Remove_RejectsInvalidName(t *testing.T) {
+	b := &argsBackend{}
+	r := &CLIRunner{bin: "podman", exec: b}
+	if err := r.Remove(context.Background(), "bad;name"); !errors.Is(err, ErrInvalidContainerName) {
+		t.Errorf("Remove(bad;name) err = %v, want ErrInvalidContainerName", err)
+	}
+	if b.args != nil {
+		t.Errorf("Remove(bad;name) spawned podman; want no exec call")
+	}
+}
+
+// TestCLIRunner_Remove_PropagatesExecError triangulates the error path.
+func TestCLIRunner_Remove_PropagatesExecError(t *testing.T) {
+	b := &argsBackend{err: errors.New("exit status 1: no such container")}
+	r := &CLIRunner{bin: "podman", exec: b}
+	err := r.Remove(context.Background(), "mybox")
+	if err == nil {
+		t.Fatalf("Remove(backend error) err = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "remove") {
+		t.Errorf("Remove error = %v, want wrapped error mentioning remove", err)
+	}
+}
+
+// --- FakeRunner doubles for the 5 new methods ---
+//
+// These mirror the existing FakeRunner test style: configured result/error
+// fields, Calls recording, and assertion of recorded call arguments.
+
+// TestFakeRunner_Create_RecordsCallAndResult verifies the fake records the
+// Create call and returns the configured error (spec scenario: Create records
+// env vars).
+func TestFakeRunner_Create_RecordsCallAndResult(t *testing.T) {
+	configuredErr := errors.New("name already in use")
+	r := &FakeRunner{CreateErr: configuredErr}
+	err := r.Create(context.Background(), "fedora:45", "mybox", []string{"EDITOR=nvim"})
+	if !errors.Is(err, configuredErr) {
+		t.Errorf("FakeRunner.Create err = %v, want %v", err, configuredErr)
+	}
+	if len(r.CreateCalls) != 1 {
+		t.Fatalf("FakeRunner.CreateCalls len = %d, want 1", len(r.CreateCalls))
+	}
+	call := r.CreateCalls[0]
+	if call.Image != "fedora:45" {
+		t.Errorf("CreateCalls[0].Image = %q, want fedora:45", call.Image)
+	}
+	if call.Name != "mybox" {
+		t.Errorf("CreateCalls[0].Name = %q, want mybox", call.Name)
+	}
+	if len(call.Env) != 1 || call.Env[0] != "EDITOR=nvim" {
+		t.Errorf("CreateCalls[0].Env = %v, want [EDITOR=nvim]", call.Env)
+	}
+}
+
+// TestFakeRunner_Create_HappyPath triangulates: nil error returns success and
+// still records the call.
+func TestFakeRunner_Create_HappyPath(t *testing.T) {
+	r := &FakeRunner{}
+	if err := r.Create(context.Background(), "ubuntu:24.04", "box2", []string{"TERM=xterm"}); err != nil {
+		t.Fatalf("FakeRunner.Create error: %v", err)
+	}
+	if len(r.CreateCalls) != 1 {
+		t.Fatalf("CreateCalls len = %d, want 1", len(r.CreateCalls))
+	}
+	if r.CreateCalls[0].Image != "ubuntu:24.04" || r.CreateCalls[0].Name != "box2" {
+		t.Errorf("CreateCalls[0] = %+v, want image=ubuntu:24.04 name=box2", r.CreateCalls[0])
+	}
+}
+
+// TestFakeRunner_Start_RecordsCall verifies the fake records Start calls.
+func TestFakeRunner_Start_RecordsCall(t *testing.T) {
+	r := &FakeRunner{StartErr: errors.New("already running")}
+	err := r.Start(context.Background(), "mybox")
+	if err == nil {
+		t.Errorf("FakeRunner.Start err = nil, want configured error")
+	}
+	if len(r.StartCalls) != 1 || r.StartCalls[0] != "mybox" {
+		t.Errorf("StartCalls = %v, want [mybox]", r.StartCalls)
+	}
+}
+
+// TestFakeRunner_Start_HappyPath triangulates the success path.
+func TestFakeRunner_Start_HappyPath(t *testing.T) {
+	r := &FakeRunner{}
+	if err := r.Start(context.Background(), "box2"); err != nil {
+		t.Fatalf("FakeRunner.Start error: %v", err)
+	}
+	if len(r.StartCalls) != 1 || r.StartCalls[0] != "box2" {
+		t.Errorf("StartCalls = %v, want [box2]", r.StartCalls)
+	}
+}
+
+// TestFakeRunner_Cp_RecordsCall verifies the fake records Cp calls.
+func TestFakeRunner_Cp_RecordsCall(t *testing.T) {
+	r := &FakeRunner{CpErr: errors.New("no such path")}
+	err := r.Cp(context.Background(), "/host/a", "mybox:/dst")
+	if err == nil {
+		t.Errorf("FakeRunner.Cp err = nil, want configured error")
+	}
+	if len(r.CpCalls) != 1 {
+		t.Fatalf("CpCalls len = %d, want 1", len(r.CpCalls))
+	}
+	if r.CpCalls[0].Src != "/host/a" || r.CpCalls[0].Dst != "mybox:/dst" {
+		t.Errorf("CpCalls[0] = %+v, want src=/host/a dst=mybox:/dst", r.CpCalls[0])
+	}
+}
+
+// TestFakeRunner_Cp_HappyPath triangulates the success path.
+func TestFakeRunner_Cp_HappyPath(t *testing.T) {
+	r := &FakeRunner{}
+	if err := r.Cp(context.Background(), "/x", "box:/y"); err != nil {
+		t.Fatalf("FakeRunner.Cp error: %v", err)
+	}
+	if len(r.CpCalls) != 1 || r.CpCalls[0].Src != "/x" {
+		t.Errorf("CpCalls = %+v, want one with src=/x", r.CpCalls)
+	}
+}
+
+// TestFakeRunner_Pull_RecordsCall verifies the fake records Pull calls.
+func TestFakeRunner_Pull_RecordsCall(t *testing.T) {
+	r := &FakeRunner{PullErr: errors.New("image not found")}
+	err := r.Pull(context.Background(), "fedora:45")
+	if err == nil {
+		t.Errorf("FakeRunner.Pull err = nil, want configured error")
+	}
+	if len(r.PullCalls) != 1 || r.PullCalls[0] != "fedora:45" {
+		t.Errorf("PullCalls = %v, want [fedora:45]", r.PullCalls)
+	}
+}
+
+// TestFakeRunner_Pull_HappyPath triangulates the success path.
+func TestFakeRunner_Pull_HappyPath(t *testing.T) {
+	r := &FakeRunner{}
+	if err := r.Pull(context.Background(), "ubuntu:24.04"); err != nil {
+		t.Fatalf("FakeRunner.Pull error: %v", err)
+	}
+	if len(r.PullCalls) != 1 || r.PullCalls[0] != "ubuntu:24.04" {
+		t.Errorf("PullCalls = %v, want [ubuntu:24.04]", r.PullCalls)
+	}
+}
+
+// TestFakeRunner_Remove_RecordsCall verifies the fake records Remove calls.
+func TestFakeRunner_Remove_RecordsCall(t *testing.T) {
+	r := &FakeRunner{RemoveErr: errors.New("no such container")}
+	err := r.Remove(context.Background(), "mybox")
+	if err == nil {
+		t.Errorf("FakeRunner.Remove err = nil, want configured error")
+	}
+	if len(r.RemoveCalls) != 1 || r.RemoveCalls[0] != "mybox" {
+		t.Errorf("RemoveCalls = %v, want [mybox]", r.RemoveCalls)
+	}
+}
+
+// TestFakeRunner_Remove_HappyPath triangulates the success path.
+func TestFakeRunner_Remove_HappyPath(t *testing.T) {
+	r := &FakeRunner{}
+	if err := r.Remove(context.Background(), "box2"); err != nil {
+		t.Fatalf("FakeRunner.Remove error: %v", err)
+	}
+	if len(r.RemoveCalls) != 1 || r.RemoveCalls[0] != "box2" {
+		t.Errorf("RemoveCalls = %v, want [box2]", r.RemoveCalls)
+	}
+}
+
+// TestFakeRunner_AllNewMethodsRecordInCalls verifies that invoking all 5 new
+// methods adds 5 entries to the shared Calls slice, proving the recording seam
+// is consistent with the existing methods.
+func TestFakeRunner_AllNewMethodsRecordInCalls(t *testing.T) {
+	r := &FakeRunner{}
+	ctx := context.Background()
+	_ = r.Create(ctx, "fedora:45", "mybox", []string{"EDITOR=nvim"})
+	_ = r.Start(ctx, "mybox")
+	_ = r.Cp(ctx, "/a", "mybox:/b")
+	_ = r.Pull(ctx, "fedora:45")
+	_ = r.Remove(ctx, "mybox")
+	// Expect the 5 new methods to appear in Calls, in order.
+	if len(r.Calls) < 5 {
+		t.Fatalf("Calls len = %d, want at least 5", len(r.Calls))
+	}
+	wantPrefixes := []string{"Create:mybox", "Start:mybox", "Cp:", "Pull:fedora:45", "Remove:mybox"}
+	for _, prefix := range wantPrefixes {
+		found := false
+		for _, c := range r.Calls {
+			if strings.HasPrefix(c, prefix) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Calls missing entry with prefix %q; Calls=%v", prefix, r.Calls)
+		}
 	}
 }
 

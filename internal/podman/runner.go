@@ -80,6 +80,10 @@ type InspectResult struct {
 // Runner abstracts the Podman operations bunkerctl needs across the backup
 // pipeline. The v1 pipeline no longer commits or saves images, so Commit and
 // Save are removed (REQ-REM-1, REQ-REM-2).
+//
+// restore-core (SDD-B) adds Create, Start, Cp, Pull, and Remove so the restore
+// pipeline can create a new container from an image, start it, copy files in,
+// pull the base image, and remove it on rollback.
 type Runner interface {
 	// Version runs `podman --version` and returns the trimmed output, or
 	// ErrEngineUnavailable when the engine is missing or errors.
@@ -94,6 +98,19 @@ type Runner interface {
 	// (a JSON array of objects). Used by internal/inspect to parse full
 	// container metadata.
 	InspectRaw(ctx context.Context, id string) (string, error)
+	// Create runs `podman create [--env <v>]... --name <name> <image>`. Each
+	// env var gets its own --env flag; an empty env slice produces no flags.
+	Create(ctx context.Context, image, name string, env []string) error
+	// Start runs `podman start <name>`.
+	Start(ctx context.Context, name string) error
+	// Cp runs `podman cp <src> <dst>`. The src/dst may use the
+	// `<container>:<path>` form; Podman parses that itself, so no container
+	// name validation is applied here.
+	Cp(ctx context.Context, src, dst string) error
+	// Pull runs `podman pull <image>`.
+	Pull(ctx context.Context, image string) error
+	// Remove runs `podman rm <name>`.
+	Remove(ctx context.Context, name string) error
 }
 
 // execBackend is the seam between CLIRunner and os/exec. It exists so tests
@@ -201,4 +218,71 @@ func (r *CLIRunner) InspectRaw(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// Create runs `podman create [--env <v>]... --name <name> <image>`. Each entry
+// in env becomes its own --env flag, in order. An empty env slice produces no
+// --env flags (spec REQ-RST-4: empty env creates with no vars). The container
+// name is validated before the exec call (defense-in-depth). An exec error —
+// e.g. a name collision — is wrapped with method context so callers can surface
+// a clear "container name already in use" message (spec: Container name
+// collision fails).
+func (r *CLIRunner) Create(ctx context.Context, image, name string, env []string) error {
+	if err := validateContainerName(name); err != nil {
+		return err
+	}
+	args := []string{"create"}
+	for _, v := range env {
+		args = append(args, "--env", v)
+	}
+	args = append(args, "--name", name, image)
+	if _, err := r.exec.CombinedOutput(ctx, r.bin, args...); err != nil {
+		return fmt.Errorf("podman create %s: %w", name, err)
+	}
+	return nil
+}
+
+// Start runs `podman start <name>`. The container name is validated before the
+// exec call. An exec error is wrapped with method context.
+func (r *CLIRunner) Start(ctx context.Context, name string) error {
+	if err := validateContainerName(name); err != nil {
+		return err
+	}
+	if _, err := r.exec.CombinedOutput(ctx, r.bin, "start", name); err != nil {
+		return fmt.Errorf("podman start %s: %w", name, err)
+	}
+	return nil
+}
+
+// Cp runs `podman cp <src> <dst>`. The src/dst may use Podman's
+// `<container>:<path>` form, which Podman parses itself, so no container name
+// validation is applied (the name may be embedded in either argument and is not
+// a standalone validated value). An exec error is wrapped with method context.
+func (r *CLIRunner) Cp(ctx context.Context, src, dst string) error {
+	if _, err := r.exec.CombinedOutput(ctx, r.bin, "cp", src, dst); err != nil {
+		return fmt.Errorf("podman cp %s %s: %w", src, dst, err)
+	}
+	return nil
+}
+
+// Pull runs `podman pull <image>`. An exec error — e.g. image not found — is
+// wrapped with method context so the restore pipeline can surface a clear "base
+// image pull failed" message (spec: Pull fails with clear error).
+func (r *CLIRunner) Pull(ctx context.Context, image string) error {
+	if _, err := r.exec.CombinedOutput(ctx, r.bin, "pull", image); err != nil {
+		return fmt.Errorf("podman pull %s: %w", image, err)
+	}
+	return nil
+}
+
+// Remove runs `podman rm <name>`. The container name is validated before the
+// exec call. An exec error is wrapped with method context.
+func (r *CLIRunner) Remove(ctx context.Context, name string) error {
+	if err := validateContainerName(name); err != nil {
+		return err
+	}
+	if _, err := r.exec.CombinedOutput(ctx, r.bin, "rm", name); err != nil {
+		return fmt.Errorf("podman remove %s: %w", name, err)
+	}
+	return nil
 }
