@@ -9,6 +9,8 @@ package preserve
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -30,10 +32,11 @@ type Entry struct {
 	IsGlob bool
 }
 
-// ParseLine trims whitespace and classifies a single preserve-list line. Blank
-// lines and lines beginning with '#' return a zero Entry (Raw == "") for
-// callers to skip. No error is returned for ordinary lines; the error return is
-// reserved for future extension (e.g. malformed escape sequences).
+// ParseLine trims whitespace, expands a leading "~/" to the user's home
+// directory, and classifies the result. Blank lines and lines beginning with
+// '#' return a zero Entry (Raw == "") for callers to skip. No error is
+// returned for ordinary lines; the error return is reserved for future
+// extension (e.g. malformed escape sequences).
 func ParseLine(line string) (Entry, error) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -42,7 +45,32 @@ func ParseLine(line string) (Entry, error) {
 	if strings.HasPrefix(trimmed, "#") {
 		return Entry{}, nil
 	}
-	return Entry{Raw: trimmed, IsGlob: hasGlobMeta(trimmed)}, nil
+	expanded := expandTilde(trimmed)
+	return Entry{Raw: expanded, IsGlob: hasGlobMeta(expanded)}, nil
+}
+
+// expandTilde replaces a leading "~/" (or lone "~") with the user's home
+// directory. Tildes in the middle of a path are left untouched. When $HOME is
+// unset or the home dir cannot be resolved, the input is returned unchanged so
+// the caller sees the literal "~" and can fail with a clear "path not found"
+// error downstream.
+func expandTilde(p string) string {
+	if !strings.HasPrefix(p, "~") {
+		return p
+	}
+	// Recognize exactly "~" or "~/"; anything else (e.g. "~user", "~foo/bar")
+	// is left alone because the spec only documents $HOME expansion.
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	return filepath.Join(home, p[2:])
 }
 
 // hasGlobMeta reports whether s contains any glob metacharacter. The set is

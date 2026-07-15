@@ -440,3 +440,67 @@ func TestBackup_ArchiveProduction_NoManagers(t *testing.T) {
 		t.Fatalf(".bunker file not created: %v", err)
 	}
 }
+// TestBackup_PreserveTildeExpanded_E2E verifies the fix for the bug where
+// preserve-list entries starting with "~/" were passed to the FS literally
+// (with the tilde), causing Stat/ReadFile to fail and the preserve dir in
+// the .bunker to be empty. The pipeline MUST expand "~/" to the user's home
+// directory before evaluating the preserve path.
+func TestBackup_PreserveTildeExpanded_E2E(t *testing.T) {
+	setSafeBackupDefaults(t)
+	destDir := t.TempDir()
+	destPath := filepath.Join(destDir, "bunker-tilde.bunker")
+	setBackupDestPath(t, destPath)
+	setBackupFormat(t, "docker-archive")
+	setBackupEditor(t, "true")
+
+	// Create a real temp dir and point $HOME at it so that `~/dotfile` resolves
+	// deterministically. The preserve entry is `~/dotfile` (literal, not glob).
+	homeDir := t.TempDir()
+	dotfilePath := filepath.Join(homeDir, "dotfile")
+	if err := os.WriteFile(dotfilePath, []byte("important config"), 0o644); err != nil {
+		t.Fatalf("write dotfile: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+
+	// Config file: preserve ["~/dotfile"]
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(`preserve = ["~/dotfile"]
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	setBackupConfigPath(t, cfgPath)
+
+	setBackupRunner(t, &podman.FakeRunner{
+		VersionStr:    "podman version 5.0.0",
+		InspectResult: podman.InspectResult{ID: "tildebunker", Image: "fedora:40"},
+		ExecFn: func(ctx context.Context, id string, cmd []string) (string, error) {
+			// No package manager present.
+			return "", errFakeNonZero
+		},
+	})
+
+	out, err := executeBackup(t, "tildebunker")
+	if err != nil {
+		t.Fatalf("backup error: %v\noutput: %s", err, out)
+	}
+
+	// Assert that staging reported 1 file.
+	if !strings.Contains(out, "staged 1 files") {
+		t.Errorf("output = %q, want substring 'staged 1 files' (tilde path should resolve and stage the dotfile)", out)
+	}
+
+	// Decompress the .bunker and verify the dotfile is inside preserve/.
+	extractDir := t.TempDir()
+	if err := (compress.ZstdTar{}).Decompress(destPath, extractDir); err != nil {
+		t.Fatalf("decompress .bunker: %v", err)
+	}
+	expectedPath := filepath.Join(extractDir, "preserve", homeDir, "dotfile")
+	data, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatalf("read preserved dotfile at %s: %v", expectedPath, err)
+	}
+	if string(data) != "important config" {
+		t.Errorf("preserved dotfile content = %q, want %q", data, "important config")
+	}
+}
