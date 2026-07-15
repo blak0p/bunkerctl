@@ -25,6 +25,10 @@ type ProduceOptions struct {
 	Format string
 	// BackupDate is the timestamp encoded in the metadata and temp image tag.
 	BackupDate time.Time
+	// Version is the bunkerctl release version recorded in the archive
+	// metadata. When empty, Metadata.Version falls back to "1" (legacy
+	// schema version) for backwards compatibility with PR 4 archives.
+	Version string
 }
 
 // Producer produces a .bunker archive from a container + staging dir.
@@ -63,12 +67,16 @@ func (p DefaultProducer) Produce(ctx context.Context, runner podman.Runner, cont
 	}
 
 	// 3. Write metadata.json to the staging dir.
+	metaVersion := opts.Version
+	if metaVersion == "" {
+		metaVersion = "1"
+	}
 	md := metadata.Metadata{
 		ContainerName: container.ID,
 		Image:         container.Image,
 		CreatedAt:     opts.BackupDate,
 		Format:        opts.Format,
-		Version:       "1",
+		Version:       metaVersion,
 	}
 	metaPath := filepath.Join(stagingDir, "metadata.json")
 	if err := p.MetaWriter.Write(metaPath, md); err != nil {

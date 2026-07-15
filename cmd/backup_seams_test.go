@@ -51,6 +51,7 @@ func setSafeBackupDefaults(t *testing.T) {
 	setBackupDestPath(t, filepath.Join(t.TempDir(), "bunker-safe.bunker"))
 	setBackupFormat(t, "docker-archive")
 }
+
 // ShellEditor (which reads $EDITOR first) uses the controlled value. Pass "" to
 // assert the no-editor error path (both $EDITOR unset and empty fallback).
 func setBackupEditor(t *testing.T, editor string) {
@@ -78,4 +79,13 @@ func setBackupFormat(t *testing.T, format string) {
 	orig := backupFormat
 	backupFormat = format
 	t.Cleanup(func() { backupFormat = orig })
+}
+
+// resetBackupFlags clears the --format and --output CLI flag bindings back to
+// their defaults (docker-archive / "") so successive Execute() runs in the
+// same test process do not inherit the previous run's flag values. Called by
+// executeBackup before each invocation. (PR 5)
+func resetBackupFlags() {
+	cliFormat = "docker-archive"
+	cliOutput = ""
 }

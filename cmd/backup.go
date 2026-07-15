@@ -57,6 +57,18 @@ var backupDestPathFn = defaultBackupDestPath
 // tests override it. PR 5 will expose this as a --format CLI flag.
 var backupFormat = "docker-archive"
 
+// cliFormat holds the value of the --format CLI flag for the current backup
+// invocation. When non-empty it overrides backupFormat. It is reset to "" in
+// resetBackupFlags (called before every runBackup) so flags from a previous
+// Execute() do not leak into the next test.
+var cliFormat string
+
+// cliOutput holds the value of the --output CLI flag for the current backup
+// invocation. When non-empty it overrides backupDestPathFn (the path is used
+// as-is, relative to the current working directory if not absolute). Reset to
+// "" in resetBackupFlags.
+var cliOutput string
+
 // defaultRunner returns the production Runner, lazily created.
 func defaultRunner() podman.Runner {
 	return podman.NewCLIRunner("")
@@ -68,6 +80,39 @@ func resolveRunner() podman.Runner {
 		return backupRunner
 	}
 	return defaultRunner()
+}
+
+// resolveFormat returns the effective podman save format for the current
+// invocation: the --format CLI flag value (cliFormat) when it was set to
+// something other than the default, otherwise the backupFormat seam (which
+// tests override directly). Because cobra parses --format into cliFormat with
+// a default of "docker-archive", cliFormat is always non-empty after parse;
+// we prefer cliFormat so an explicit --format=docker-archive behaves the same
+// as the default, and tests that call setBackupFormat still drive the seam
+// when no --format flag was passed.
+func resolveFormat() string {
+	if cliFormat != "" {
+		return cliFormat
+	}
+	return backupFormat
+}
+
+// resolveOutput returns the effective destination .bunker path override for
+// the current invocation: the --output CLI flag value (cliOutput) when set,
+// otherwise "" (meaning the backupDestPathFn seam / default path applies).
+// A relative --output path is resolved against the current working directory.
+func resolveOutput() string {
+	if cliOutput == "" {
+		return ""
+	}
+	if filepath.IsAbs(cliOutput) {
+		return cliOutput
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return cliOutput
+	}
+	return filepath.Join(cwd, cliOutput)
 }
 
 // defaultConfigPath returns the default config file path:
@@ -88,11 +133,21 @@ func defaultConfigPath() string {
 // PR 2 wiring: engine availability check, explicit-name selection, and an
 // interactive chooser when no name is given. PR 3 adds preserve-list staging
 // (config load + glob expansion + copy), package manager detection, and the
-// editable manifest step. Archive production arrives in a later PR.
+// editable manifest step. PR 4 adds cache cleaning and archive production.
+// PR 5 adds the --format and --output CLI flags, help text, and examples.
 var backupCmd = &cobra.Command{
-	Use:   "backup",
+	Use:   "backup [name]",
 	Short: "Backup a Podman bunker",
-	Args:  cobra.MaximumNArgs(1),
+	Long: `Backup a Podman distrobox bunker to a portable .bunker archive.
+
+The bunker includes the container's image, the explicitly installed packages
+(from the detected package manager), and the preserve-list from the config file.
+Cache directories are cleaned before packaging.`,
+	Example: `  bunkerctl backup                          # interactive chooser
+  bunkerctl backup mybunker                  # explicit name
+  bunkerctl backup mybunker --format=oci-archive
+  bunkerctl backup mybunker --output=/tmp/bunker.bunker`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBackup(cmd, args)
 	},
@@ -100,6 +155,10 @@ var backupCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(backupCmd)
+	backupCmd.Flags().StringVar(&cliFormat, "format", "docker-archive",
+		"podman save format: docker-archive (default) or oci-archive")
+	backupCmd.Flags().StringVar(&cliOutput, "output", "",
+		"write the .bunker archive to this path (default: ~/.bunkerctl/backups/)")
 }
 
 // runBackup implements the engine-check + selection + staging + detection +
@@ -108,6 +167,15 @@ func init() {
 func runBackup(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	runner := resolveRunner()
+
+	// 0. Resolve and validate CLI flags (--format, --output) before any
+	// pipeline work so an invalid value fails fast with a clear message.
+	format := resolveFormat()
+	if !podman.AllowedSaveFormat(format) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "error: invalid format %q (allowed: docker-archive, oci-archive)\n", format)
+		return fmt.Errorf("invalid format %q", format)
+	}
+	outputPath := resolveOutput()
 
 	// 1. Engine availability check — fail fast before any selection work.
 	if _, err := runner.Version(ctx); err != nil {
@@ -252,14 +320,18 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	backupDate := time.Now()
-	destPath := backupDestPathFn(name)
+	destPath := outputPath
+	if destPath == "" {
+		destPath = backupDestPathFn(name)
+	}
 	producer := archive.DefaultProducer{
 		Compressor: compress.ZstdTar{},
 		MetaWriter: metadata.JSONWriter{},
 	}
 	if _, err := producer.Produce(ctx, runner, inspectResult, stagingDir, destPath, archive.ProduceOptions{
-		Format:    backupFormat,
+		Format:     format,
 		BackupDate: backupDate,
+		Version:    Version,
 	}); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "error: producing archive: %v\n", err)
 		return err

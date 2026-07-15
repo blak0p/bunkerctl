@@ -9,8 +9,11 @@ import (
 )
 
 // Version is the bunkerctl build version, bound to the root command's
-// --version flag. It is overridable at link time via -ldflags.
-var Version = "0.0.0-dev"
+// --version flag. It is overridable at link time via -ldflags. The value
+// "0.1.0" marks the first user-visible release of bunkerctl with the
+// backup-core feature (SDD 1). Future restore (SDD 2) / upgrade (SDD 3)
+// releases will bump this.
+var Version = "0.1.0"
 
 // rootCmd is the bunkerctl root command.
 var rootCmd = &cobra.Command{

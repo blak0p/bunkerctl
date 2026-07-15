@@ -2,6 +2,14 @@ package podman
 
 import "context"
 
+// SaveCall records a single Save invocation: the image ref, the --format value,
+// and the destination path.
+type SaveCall struct {
+	Image  string
+	Format string
+	Dest   string
+}
+
 // FakeRunner is an exported test double implementing Runner. It lives in a
 // non-test file so that cross-package tests (e.g. cmd) can drive the backup
 // command against a controlled Podman without a real engine. It is not
@@ -17,6 +25,11 @@ type FakeRunner struct {
 	// InspectResult is returned by Inspect when InspectErr is nil.
 	InspectResult InspectResult
 	InspectErr    error
+
+	// SaveCalls records every Save invocation with its image, format, and dest.
+	// Callers can assert the --format flag flowed through by inspecting the last
+	// entry's Format field.
+	SaveCalls []SaveCall
 
 	// ExecFn, when non-nil, is called by Exec and its return values are
 	// passed through. This lets cmd-level tests drive package detection and
@@ -53,6 +66,7 @@ func (f *FakeRunner) Commit(ctx context.Context, id, image string) error {
 
 func (f *FakeRunner) Save(ctx context.Context, image, format, dest string) error {
 	f.Calls = append(f.Calls, "Save:"+image)
+	f.SaveCalls = append(f.SaveCalls, SaveCall{Image: image, Format: format, Dest: dest})
 	return f.Err
 }
 

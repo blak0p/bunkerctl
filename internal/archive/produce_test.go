@@ -20,11 +20,11 @@ import (
 // callRunner records Commit and Save invocations and lets tests drive error
 // paths.
 type callRunner struct {
-	commitCalls    []commitCall
-	saveCalls      []saveCall
-	commitErr      error
-	saveErr        error
-	inspectResult  podman.InspectResult
+	commitCalls   []commitCall
+	saveCalls     []saveCall
+	commitErr     error
+	saveErr       error
+	inspectResult podman.InspectResult
 }
 
 type commitCall struct{ id, image string }
@@ -73,7 +73,7 @@ func TestProducer_Produce_DockerArchive(t *testing.T) {
 
 	p := newProducer()
 	md, err := p.Produce(context.Background(), r, r.inspectResult, staging, dest, ProduceOptions{
-		Format:    "docker-archive",
+		Format:     "docker-archive",
 		BackupDate: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -117,7 +117,7 @@ func TestProducer_Produce_CommitFails(t *testing.T) {
 
 	p := newProducer()
 	_, err := p.Produce(context.Background(), r, r.inspectResult, staging, dest, ProduceOptions{
-		Format:    "docker-archive",
+		Format:     "docker-archive",
 		BackupDate: time.Now(),
 	})
 	if !errors.Is(err, ErrArchiveFailed) {
@@ -138,7 +138,7 @@ func TestProducer_Produce_RoundTrip(t *testing.T) {
 
 	p := newProducer()
 	_, err := p.Produce(context.Background(), r, r.inspectResult, staging, dest, ProduceOptions{
-		Format:    "docker-archive",
+		Format:     "docker-archive",
 		BackupDate: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -180,7 +180,7 @@ func TestProducer_Produce_OciArchive(t *testing.T) {
 
 	p := newProducer()
 	_, err := p.Produce(context.Background(), r, r.inspectResult, staging, dest, ProduceOptions{
-		Format:    "oci-archive",
+		Format:     "oci-archive",
 		BackupDate: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -188,6 +188,29 @@ func TestProducer_Produce_OciArchive(t *testing.T) {
 	}
 	if len(r.saveCalls) != 1 || r.saveCalls[0].format != "oci-archive" {
 		t.Errorf("Save calls = %+v, want one with format oci-archive", r.saveCalls)
+	}
+}
+
+// TestProducer_Produce_VersionFromOptions is a RED test (Slice 7): Produce MUST
+// copy ProduceOptions.Version into Metadata.Version so the .bunker archive
+// records the bunkerctl release that produced it (default "1" is replaced by
+// the caller-supplied release version, e.g. "0.1.0").
+func TestProducer_Produce_VersionFromOptions(t *testing.T) {
+	r := &callRunner{inspectResult: podman.InspectResult{ID: "verbunker", Image: "fedora:40"}}
+	staging := t.TempDir()
+	dest := filepath.Join(t.TempDir(), "ver.bunker")
+
+	p := newProducer()
+	md, err := p.Produce(context.Background(), r, r.inspectResult, staging, dest, ProduceOptions{
+		Format:     "docker-archive",
+		BackupDate: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
+		Version:    "0.1.0",
+	})
+	if err != nil {
+		t.Fatalf("Produce error: %v", err)
+	}
+	if md.Version != "0.1.0" {
+		t.Errorf("Metadata.Version = %q, want %q", md.Version, "0.1.0")
 	}
 }
 
