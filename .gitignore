@@ -1,0 +1,37 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+*.cover
+*.coverprofile
+vendor/
+
+# Build artifacts
+bin/
+dist/
+build/
+
+# Local config
+.env
+.env.local
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Go workspace
+go.work
+go.work.sum
+
+# bunkerctl runtime
+~/.bunkerctl/backups/
+~/.bunkerctl/tmp/
