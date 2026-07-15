@@ -11,9 +11,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/blak0p/bunkerctl/internal/archive"
+	"github.com/blak0p/bunkerctl/internal/cleaner"
+	"github.com/blak0p/bunkerctl/internal/compress"
 	"github.com/blak0p/bunkerctl/internal/config"
 	"github.com/blak0p/bunkerctl/internal/manifest"
+	"github.com/blak0p/bunkerctl/internal/metadata"
 	"github.com/blak0p/bunkerctl/internal/packages"
 	"github.com/blak0p/bunkerctl/internal/podman"
 	"github.com/blak0p/bunkerctl/internal/preserve"
@@ -42,6 +47,15 @@ var backupStagingRoot string
 // backupEditorFallback is the fallback editor when $EDITOR is unset. Defaults
 // to "vi" in production. Tests set it to "" to assert the no-editor error.
 var backupEditorFallback = "vi"
+
+// backupDestPathFn returns the destination .bunker file path for a given
+// container name. Overridable via the BUNKERCTL_BACKUP_DIR env var (used as the
+// parent dir) for tests; defaults to ~/.bunkerctl/backups/bunker-<name>-<ts>.bunker.
+var backupDestPathFn = defaultBackupDestPath
+
+// backupFormat is the podman save --format value. Defaults to "docker-archive";
+// tests override it. PR 5 will expose this as a --format CLI flag.
+var backupFormat = "docker-archive"
 
 // defaultRunner returns the production Runner, lazily created.
 func defaultRunner() podman.Runner {
@@ -217,9 +231,40 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "manifest confirmed: %d packages\n", len(finalPkgs))
-
-	// Placeholder for archive production (Slice 5+).
 	fmt.Fprintf(cmd.OutOrStdout(), "backup of %s prepared in %s\n", name, stagingDir)
+
+	// 8. Cache cleaning — only known cache paths for detected managers, only
+	// AFTER the manifest is confirmed.
+	if len(managers) > 0 {
+		clnr := cleaner.DefaultCleaner{}
+		if err := clnr.Clean(ctx, runner, name, managers); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "error: cleaning caches: %v\n", err)
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "cleaned %d cache dirs\n", len(managers))
+	}
+
+	// 9. Archive production — commit container, save image, write metadata,
+	// compress the staging tree into the dest .bunker file.
+	inspectResult, err := runner.Inspect(ctx, name)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "error: inspecting container before archive: %v\n", err)
+		return err
+	}
+	backupDate := time.Now()
+	destPath := backupDestPathFn(name)
+	producer := archive.DefaultProducer{
+		Compressor: compress.ZstdTar{},
+		MetaWriter: metadata.JSONWriter{},
+	}
+	if _, err := producer.Produce(ctx, runner, inspectResult, stagingDir, destPath, archive.ProduceOptions{
+		Format:    backupFormat,
+		BackupDate: backupDate,
+	}); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "error: producing archive: %v\n", err)
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "backup created: %s\n", destPath)
 	return nil
 }
 
@@ -233,6 +278,24 @@ func stagingRoot() string {
 		return v
 	}
 	return os.TempDir()
+}
+
+// defaultBackupDestPath returns the default destination .bunker path for a
+// container: $BUNKERCTL_BACKUP_DIR (or ~/.bunkerctl/backups) +
+// bunker-<name>-<timestamp>.bunker. The parent dir is created if missing.
+func defaultBackupDestPath(name string) string {
+	dir := os.Getenv("BUNKERCTL_BACKUP_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			dir = filepath.Join(home, ".bunkerctl", "backups")
+		} else {
+			dir = os.TempDir()
+		}
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	ts := time.Now().Format("20060102-150405")
+	return filepath.Join(dir, "bunker-"+name+"-"+ts+".bunker")
 }
 
 // resolvePreserveFS returns the test-injected FS, or the real os.DirFS("/") for
