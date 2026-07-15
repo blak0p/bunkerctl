@@ -185,7 +185,7 @@ func TestCLIRunner_List_MultipleContainers(t *testing.T) {
 	}
 }
 
-// --- PR 4: Commit/Save format validation + validateImageRef ---
+// --- backup-format-v1 PR 2: InspectRaw (additive, non-breaking) ---
 
 // argsBackend records the args passed to CombinedOutput so tests can assert the
 // exact podman command line.
@@ -204,63 +204,6 @@ func (a *argsBackend) CombinedOutput(ctx context.Context, name string, args ...s
 	}
 	return []byte(a.out), nil
 }
-
-// TestCLIRunner_Save_RejectsInvalidFormat is a RED test: Save with an
-// unsupported format ("gzip") MUST return ErrInvalidFormat BEFORE spawning the
-// podman process (no exec call).
-func TestCLIRunner_Save_RejectsInvalidFormat(t *testing.T) {
-	b := &argsBackend{}
-	r := &CLIRunner{bin: "podman", exec: b}
-	err := r.Save(context.Background(), "fedora:40", "gzip", "/tmp/x.tar")
-	if !errors.Is(err, ErrInvalidFormat) {
-		t.Errorf("Save(gzip) err = %v, want ErrInvalidFormat", err)
-	}
-	if b.args != nil {
-		t.Errorf("Save(gzip) spawned podman with args %v; want no exec call", b.args)
-	}
-}
-
-// TestCLIRunner_Save_DockerArchive triangulates: Save with format
-// "docker-archive" MUST run `podman save --format=docker-archive -o <dest>
-// <image>` (the right podman command).
-func TestCLIRunner_Save_DockerArchive(t *testing.T) {
-	b := &argsBackend{}
-	r := &CLIRunner{bin: "podman", exec: b}
-	if err := r.Save(context.Background(), "fedora:40", "docker-archive", "/tmp/x.tar"); err != nil {
-		t.Fatalf("Save(docker-archive) error: %v", err)
-	}
-	if b.name != "podman" {
-		t.Errorf("binary = %q, want podman", b.name)
-	}
-	// Expected: save --format=docker-archive -o /tmp/x.tar fedora:40
-	want := []string{"save", "--format=docker-archive", "-o", "/tmp/x.tar", "fedora:40"}
-	if len(b.args) != len(want) {
-		t.Fatalf("args = %v, want %v", b.args, want)
-	}
-	for i, w := range want {
-		if b.args[i] != w {
-			t.Errorf("args[%d] = %q, want %q (full: %v)", i, b.args[i], w, b.args)
-		}
-	}
-}
-
-// TestCLIRunner_Save_OciArchive triangulates: with format "oci-archive" the
-// --format flag reflects it.
-func TestCLIRunner_Save_OciArchive(t *testing.T) {
-	b := &argsBackend{}
-	r := &CLIRunner{bin: "podman", exec: b}
-	if err := r.Save(context.Background(), "ubuntu:24.04", "oci-archive", "/tmp/o.tar"); err != nil {
-		t.Fatalf("Save(oci-archive) error: %v", err)
-	}
-	want := []string{"save", "--format=oci-archive", "-o", "/tmp/o.tar", "ubuntu:24.04"}
-	for i, w := range want {
-		if b.args[i] != w {
-			t.Errorf("args[%d] = %q, want %q (full: %v)", i, b.args[i], w, b.args)
-		}
-	}
-}
-
-// --- backup-format-v1 PR 2: InspectRaw (additive, non-breaking) ---
 
 // TestCLIRunner_InspectRaw_RunsPodmanInspect asserts InspectRaw runs
 // `podman inspect <id>` and returns the trimmed raw JSON.
@@ -332,55 +275,3 @@ func TestFakeRunner_InspectRaw_ExecFnPassthrough(t *testing.T) {
 	}
 }
 
-// TestCLIRunner_Commit_RunsPodmanCommit is a RED test: Commit MUST run
-// `podman commit <id> <image>`.
-func TestCLIRunner_Commit_RunsPodmanCommit(t *testing.T) {
-	b := &argsBackend{}
-	r := &CLIRunner{bin: "podman", exec: b}
-	if err := r.Commit(context.Background(), "mybunker", "bunkerctl-tmp-123"); err != nil {
-		t.Fatalf("Commit error: %v", err)
-	}
-	want := []string{"commit", "mybunker", "bunkerctl-tmp-123"}
-	if len(b.args) != len(want) {
-		t.Fatalf("Commit args = %v, want %v", b.args, want)
-	}
-	for i, w := range want {
-		if b.args[i] != w {
-			t.Errorf("Commit args[%d] = %q, want %q", i, b.args[i], w)
-		}
-	}
-}
-
-// TestValidateImageRef_RejectsInjection is a RED test: validateImageRef MUST
-// reject shell-injection attempts like `image;rm` and names with spaces.
-func TestValidateImageRef_RejectsInjection(t *testing.T) {
-	bad := []string{
-		"image;rm",
-		"image with space",
-		"image&foo",
-		"image|bar",
-		"image`whoami`",
-	}
-	for _, ref := range bad {
-		if err := validateImageRef(ref); !errors.Is(err, ErrInvalidContainerName) {
-			t.Errorf("validateImageRef(%q) err = %v, want ErrInvalidContainerName", ref, err)
-		}
-	}
-}
-
-// TestValidateImageRef_AcceptsValidRefs triangulates: valid image refs with
-// tags, registry paths, and digests MUST be accepted.
-func TestValidateImageRef_AcceptsValidRefs(t *testing.T) {
-	good := []string{
-		"fedora:40",
-		"docker.io/library/ubuntu:24.04",
-		"myregistry.com:5000/myimg:v1",
-		"image@sha256:abc123",
-		"bunkerctl-tmp-1700000000",
-	}
-	for _, ref := range good {
-		if err := validateImageRef(ref); err != nil {
-			t.Errorf("validateImageRef(%q) err = %v, want nil", ref, err)
-		}
-	}
-}

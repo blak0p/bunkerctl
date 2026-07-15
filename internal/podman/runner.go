@@ -27,23 +27,6 @@ var ErrInvalidContainerName = errors.New("invalid container name")
 // reports the requested container does not exist.
 var ErrContainerNotFound = errors.New("container not found")
 
-// ErrInvalidFormat is returned by Save when the requested --format value is not
-// in the allowed set (docker-archive, oci-archive).
-var ErrInvalidFormat = errors.New("invalid save format")
-
-// allowedSaveFormats is the set of --format values accepted by Save.
-var allowedSaveFormats = map[string]bool{
-	"docker-archive": true,
-	"oci-archive":    true,
-}
-
-// AllowedSaveFormat reports whether f is an accepted podman save --format
-// value (docker-archive or oci-archive). Exported so the cmd layer can
-// validate the --format CLI flag before any pipeline work.
-func AllowedSaveFormat(f string) bool {
-	return allowedSaveFormats[f]
-}
-
 // maxContainerNameLen is the Podman-imposed upper bound on container name/ID
 // length. Names longer than this are rejected defensively.
 const maxContainerNameLen = 256
@@ -78,31 +61,6 @@ func validateContainerName(name string) error {
 	return nil
 }
 
-// validateImageRef validates an image reference passed to Commit/Save. Image
-// refs are more permissive than container names — they allow `:` (tags),
-// `/` (registry paths), and `@` (digests) — but still reject shell
-// metacharacters and whitespace to prevent injection. Empty or overlong refs
-// are rejected with ErrInvalidContainerName (the shared name/error sentinel).
-func validateImageRef(ref string) error {
-	if ref == "" {
-		return ErrInvalidContainerName
-	}
-	if len(ref) > maxContainerNameLen {
-		return ErrInvalidContainerName
-	}
-	for _, c := range ref {
-		switch c {
-		case ':', '/', '@', '.', '_', '-':
-			continue
-		}
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
-			continue
-		}
-		return ErrInvalidContainerName
-	}
-	return nil
-}
-
 // Runner.List. Fields are filled in by later slices; this PR only declares
 // the shape.
 type Container struct {
@@ -120,25 +78,21 @@ type InspectResult struct {
 }
 
 // Runner abstracts the Podman operations bunkerctl needs across the backup
-// chain. Only Version is implemented in PR 1; the remaining methods are
-// placeholders that return "not implemented" and are filled in by later PRs.
+// pipeline. The v1 pipeline no longer commits or saves images, so Commit and
+// Save are removed (REQ-REM-1, REQ-REM-2).
 type Runner interface {
 	// Version runs `podman --version` and returns the trimmed output, or
 	// ErrEngineUnavailable when the engine is missing or errors.
 	Version(ctx context.Context) (string, error)
-	// List runs `podman ps` and returns the containers. Implemented in PR 2.
+	// List runs `podman ps [--all] --format json` and returns the containers.
 	List(ctx context.Context, all bool) ([]Container, error)
-	// Inspect runs `podman inspect <id>`. Implemented in a later PR.
+	// Inspect runs `podman inspect <id>` and returns a minimal result.
 	Inspect(ctx context.Context, id string) (InspectResult, error)
-	// Commit runs `podman commit <id> <image>`. Implemented in a later PR.
-	Commit(ctx context.Context, id, image string) error
-	// Save runs `podman save`. Implemented in a later PR.
-	Save(ctx context.Context, image, format, dest string) error
-	// Exec runs `podman exec <id> <cmd>`. Implemented in a later PR.
+	// Exec runs `podman exec <id> <cmd...>` and returns the trimmed stdout.
 	Exec(ctx context.Context, id string, cmd []string) (string, error)
 	// InspectRaw runs `podman inspect <id>` and returns the raw JSON output
-	// (a JSON array of objects). It is a non-breaking addition used by the
-	// backup-format-v1 inspect package to parse full container metadata.
+	// (a JSON array of objects). Used by internal/inspect to parse full
+	// container metadata.
 	InspectRaw(ctx context.Context, id string) (string, error)
 }
 
@@ -206,9 +160,9 @@ func parseContainerList(raw []byte) ([]Container, error) {
 	return containers, nil
 }
 
-// Inspect runs `podman inspect <id>`. PR 2 wires the name validation seam; the
-// full parse of inspect output arrives in a later PR, so on a successful exec
-// it returns a minimal InspectResult populated from the raw JSON.
+// Inspect runs `podman inspect --format json <id>` and returns a minimal
+// InspectResult. Full metadata parsing is handled by internal/inspect via
+// InspectRaw.
 func (r *CLIRunner) Inspect(ctx context.Context, id string) (InspectResult, error) {
 	if err := validateContainerName(id); err != nil {
 		return InspectResult{}, err
@@ -220,36 +174,8 @@ func (r *CLIRunner) Inspect(ctx context.Context, id string) (InspectResult, erro
 	return InspectResult{ID: id, Image: strings.TrimSpace(string(out))}, nil
 }
 
-// Commit runs `podman commit <id> <image>`. The container id is validated with
-// validateContainerName; the image ref with validateImageRef (which allows tags
-// and registry paths).
-func (r *CLIRunner) Commit(ctx context.Context, id, image string) error {
-	if err := validateContainerName(id); err != nil {
-		return err
-	}
-	if err := validateImageRef(image); err != nil {
-		return err
-	}
-	_, err := r.exec.CombinedOutput(ctx, r.bin, "commit", id, image)
-	return err
-}
-
-// Save runs `podman save --format=<format> -o <dest> <image>`. The format MUST be
-// docker-archive or oci-archive; anything else returns ErrInvalidFormat BEFORE
-// spawning the podman process. The image ref is validated with validateImageRef.
-func (r *CLIRunner) Save(ctx context.Context, image, format, dest string) error {
-	if !allowedSaveFormats[format] {
-		return ErrInvalidFormat
-	}
-	if err := validateImageRef(image); err != nil {
-		return err
-	}
-	_, err := r.exec.CombinedOutput(ctx, r.bin, "save", "--format="+format, "-o", dest, image)
-	return err
-}
-
-// Exec runs `podman exec <id> <cmd...>`. PR 2 wires the name validation seam;
-// the full exec-pipeline behavior arrives in a later PR.
+// Exec runs `podman exec <id> <cmd...>` and returns the trimmed stdout. The
+// container id is validated before the exec call.
 func (r *CLIRunner) Exec(ctx context.Context, id string, cmd []string) (string, error) {
 	if err := validateContainerName(id); err != nil {
 		return "", err

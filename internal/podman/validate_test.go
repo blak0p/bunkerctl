@@ -84,24 +84,6 @@ func TestCLIRunner_Inspect_RejectsInvalidName(t *testing.T) {
 	}
 }
 
-// TestCLIRunner_Commit_RejectsInvalidName triangulates the wiring across a
-// different Runner method.
-func TestCLIRunner_Commit_RejectsInvalidName(t *testing.T) {
-	r := &CLIRunner{bin: "podman", exec: &fakeBackend{out: ""}}
-	if err := r.Commit(context.Background(), "foo|bar", "img"); !errors.Is(err, ErrInvalidContainerName) {
-		t.Errorf("Commit(inject) err = %v, want ErrInvalidContainerName", err)
-	}
-}
-
-// TestCLIRunner_Save_RejectsInvalidName triangulates the wiring to a third
-// method.
-func TestCLIRunner_Save_RejectsInvalidName(t *testing.T) {
-	r := &CLIRunner{bin: "podman", exec: &fakeBackend{out: ""}}
-	if err := r.Save(context.Background(), "foo&bar", "docker-archive", "/tmp/x"); !errors.Is(err, ErrInvalidContainerName) {
-		t.Errorf("Save(inject) err = %v, want ErrInvalidContainerName", err)
-	}
-}
-
 // TestCLIRunner_Exec_RejectsInvalidName triangulates the wiring to Exec.
 func TestCLIRunner_Exec_RejectsInvalidName(t *testing.T) {
 	r := &CLIRunner{bin: "podman", exec: &fakeBackend{out: ""}}
