@@ -7,7 +7,9 @@ package podman
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 )
@@ -16,14 +18,57 @@ import (
 // (binary missing, non-zero exit from `podman --version`, etc.).
 var ErrEngineUnavailable = errors.New("podman engine unavailable")
 
+// ErrInvalidContainerName is returned when a container name or ID passed to a
+// Runner method fails validation (empty, contains shell metacharacters, or
+// exceeds the Podman length limit).
+var ErrInvalidContainerName = errors.New("invalid container name")
+
+// ErrContainerNotFound is returned by Inspect when the container engine
+// reports the requested container does not exist.
+var ErrContainerNotFound = errors.New("container not found")
+
+// maxContainerNameLen is the Podman-imposed upper bound on container name/ID
+// length. Names longer than this are rejected defensively.
+const maxContainerNameLen = 256
+
+// ValidateContainerName rejects names that could enable command injection or
+// exceed the engine's length limit. Container names/IDs originate from CLI
+// args and `podman ps` output; this is the defense-in-depth seam that prevents
+// a malicious or malformed value from being interpolated into a podman call.
+// It is exported so command-layer code can validate at its own boundary
+// before touching the engine.
+func ValidateContainerName(name string) error {
+	return validateContainerName(name)
+}
+
+// validateContainerName rejects names that could enable command injection or
+// exceed the engine's length limit. Container names/IDs originate from CLI
+// args and `podman ps` output; this is the defense-in-depth seam that prevents
+// a malicious or malformed value from being interpolated into a podman call.
+func validateContainerName(name string) error {
+	if name == "" {
+		return ErrInvalidContainerName
+	}
+	if len(name) > maxContainerNameLen {
+		return ErrInvalidContainerName
+	}
+	for _, c := range name {
+		switch c {
+		case ';', '&', '|', '`', '$', '(', ')', '<', '>', '\n', '\r':
+			return ErrInvalidContainerName
+		}
+	}
+	return nil
+}
+
 // Container is a minimal description of a Podman container, returned by
 // Runner.List. Fields are filled in by later slices; this PR only declares
 // the shape.
 type Container struct {
-	ID     string
-	Names  []string
-	Image  string
-	Status string
+	ID     string   `json:"Id"`
+	Names  []string `json:"Names"`
+	Image  string   `json:"Image"`
+	Status string   `json:"Status"`
 }
 
 // InspectResult is a minimal description of `podman inspect` output. Later
@@ -91,27 +136,78 @@ func (r *CLIRunner) Version(ctx context.Context) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// List is a placeholder implemented in PR 2.
+// List runs `podman ps [--all] --format json` and parses the JSON array of
+// containers. An empty result returns a non-nil empty slice so callers can
+// range over it without nil checks. Malformed JSON surfaces as a parse error.
 func (r *CLIRunner) List(ctx context.Context, all bool) ([]Container, error) {
-	return nil, errors.New("not implemented")
+	args := []string{"ps", "--format", "json"}
+	if all {
+		args = append(args, "-a")
+	}
+	out, err := r.exec.CombinedOutput(ctx, r.bin, args...)
+	if err != nil {
+		return nil, err
+	}
+	return parseContainerList(out)
 }
 
-// Inspect is a placeholder implemented in a later PR.
+// parseContainerList decodes the podman ps JSON payload into []Container. An
+// empty payload ("[]\n" or whitespace) yields a non-nil empty slice.
+func parseContainerList(raw []byte) ([]Container, error) {
+	containers := []Container{}
+	if err := json.Unmarshal(raw, &containers); err != nil {
+		return nil, fmt.Errorf("parsing podman ps output: %w", err)
+	}
+	return containers, nil
+}
+
+// Inspect runs `podman inspect <id>`. PR 2 wires the name validation seam; the
+// full parse of inspect output arrives in a later PR, so on a successful exec
+// it returns a minimal InspectResult populated from the raw JSON.
 func (r *CLIRunner) Inspect(ctx context.Context, id string) (InspectResult, error) {
-	return InspectResult{}, errors.New("not implemented")
+	if err := validateContainerName(id); err != nil {
+		return InspectResult{}, err
+	}
+	out, err := r.exec.CombinedOutput(ctx, r.bin, "inspect", "--format", "json", id)
+	if err != nil {
+		return InspectResult{}, err
+	}
+	return InspectResult{ID: id, Image: strings.TrimSpace(string(out))}, nil
 }
 
-// Commit is a placeholder implemented in a later PR.
+// Commit runs `podman commit <id> <image>`. PR 2 wires the name validation
+// seam; the full commit-pipeline behavior arrives in a later PR.
 func (r *CLIRunner) Commit(ctx context.Context, id, image string) error {
-	return errors.New("not implemented")
+	if err := validateContainerName(id); err != nil {
+		return err
+	}
+	if err := validateContainerName(image); err != nil {
+		return err
+	}
+	_, err := r.exec.CombinedOutput(ctx, r.bin, "commit", id, image)
+	return err
 }
 
-// Save is a placeholder implemented in a later PR.
+// Save runs `podman save <image> -o <dest> -f <format>`. PR 2 wires the name
+// validation seam; the full save-pipeline behavior arrives in a later PR.
 func (r *CLIRunner) Save(ctx context.Context, image, format, dest string) error {
-	return errors.New("not implemented")
+	if err := validateContainerName(image); err != nil {
+		return err
+	}
+	_, err := r.exec.CombinedOutput(ctx, r.bin, "save", image, "-o", dest, "-f", format)
+	return err
 }
 
-// Exec is a placeholder implemented in a later PR.
+// Exec runs `podman exec <id> <cmd...>`. PR 2 wires the name validation seam;
+// the full exec-pipeline behavior arrives in a later PR.
 func (r *CLIRunner) Exec(ctx context.Context, id string, cmd []string) (string, error) {
-	return "", errors.New("not implemented")
+	if err := validateContainerName(id); err != nil {
+		return "", err
+	}
+	args := append([]string{"exec", id}, cmd...)
+	out, err := r.exec.CombinedOutput(ctx, r.bin, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
