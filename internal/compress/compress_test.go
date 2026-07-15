@@ -37,9 +37,9 @@ func TestZstdTar_Compress_ThreeFiles(t *testing.T) {
 	// Round-trip: decode zstd then read tar entries.
 	got := decodeZstdTar(t, dest)
 	want := map[string]string{
-		"a.txt":       "alpha",
-		"b.txt":       "beta",
-		"sub/c.txt":   "gamma",
+		"a.txt":     "alpha",
+		"b.txt":     "beta",
+		"sub/c.txt": "gamma",
 	}
 	for name, wantContent := range want {
 		gotContent, ok := got[name]
@@ -103,6 +103,51 @@ func TestZstdTar_Level3RoundTrips(t *testing.T) {
 	got := decodeZstdTar(t, dest)
 	if got["data.txt"] != strings.Repeat("x", 2048) {
 		t.Errorf("round-trip content mismatch for data.txt")
+	}
+}
+
+// TestZstdTar_Compress_SkipsDeadSymlink verifies that a dangling symlink does
+// not abort compression; the symlink is skipped and the archive succeeds.
+func TestZstdTar_Compress_SkipsDeadSymlink(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "real.txt"), "real")
+	if err := os.Symlink(filepath.Join(src, "missing.txt"), filepath.Join(src, "link.txt")); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "deadlink.bunker")
+	if err := (ZstdTar{}).Compress(src, dest); err != nil {
+		t.Fatalf("Compress error: %v", err)
+	}
+	got := decodeZstdTar(t, dest)
+	if _, ok := got["link.txt"]; ok {
+		t.Errorf("dangling symlink archived as link.txt")
+	}
+	if got["real.txt"] != "real" {
+		t.Errorf("real.txt content = %q, want %q", got["real.txt"], "real")
+	}
+}
+
+// TestZstdTar_Compress_SkipsExistingSymlink verifies that an existing symlink
+// is skipped. The target is archived separately only if it lives inside the
+// walked tree.
+func TestZstdTar_Compress_SkipsExistingSymlink(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "target.txt"), "target-data")
+	if err := os.Symlink(filepath.Join(src, "target.txt"), filepath.Join(src, "link.txt")); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "existinglink.bunker")
+	if err := (ZstdTar{}).Compress(src, dest); err != nil {
+		t.Fatalf("Compress error: %v", err)
+	}
+	got := decodeZstdTar(t, dest)
+	if _, ok := got["link.txt"]; ok {
+		t.Errorf("symlink archived as link.txt")
+	}
+	if got["target.txt"] != "target-data" {
+		t.Errorf("target.txt content = %q, want %q", got["target.txt"], "target-data")
 	}
 }
 

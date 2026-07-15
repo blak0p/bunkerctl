@@ -62,10 +62,11 @@ func (ZstdTar) Compress(srcDir, destPath string) error {
 	return tarDir(srcDir, tw)
 }
 
-// tarDir walks srcDir and writes a tar entry for every regular file, using the
-// path relative to srcDir as the entry name.
+// tarDir walks srcDir and writes a tar entry for every regular file and
+// directory, using the path relative to srcDir as the entry name. Symlinks are
+// skipped (not archived) to avoid following dangling or directory symlinks.
 func tarDir(srcDir string, tw *tar.Writer) error {
-	return filepath.Walk(srcDir, func(path string, fi os.FileInfo, err error) error {
+	return filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -76,6 +77,21 @@ func tarDir(srcDir string, tw *tar.Writer) error {
 		// Use forward slashes for portable tar entries.
 		rel = strings.ReplaceAll(rel, string(os.PathSeparator), "/")
 		if rel == "." {
+			return nil
+		}
+		// WalkDir does not follow symlinks, but DirEntry.Type can be zero for
+		// some filesystems, so use Lstat for reliable symlink detection.
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if !fi.Mode().IsRegular() && !fi.IsDir() {
 			return nil
 		}
 		hdr, err := tar.FileInfoHeader(fi, "")
