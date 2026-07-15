@@ -19,10 +19,11 @@ func TestBackupCommand_Registered(t *testing.T) {
 }
 
 // TestBackupCommand_Use triangulates: the registered command's Use string is
-// "backup", proving the right command was wired. Carried over from PR 1.
+// "backup [name]" (PR 5 UX polish: optional name shown in usage), proving the
+// right command was wired. Carried over from PR 1, updated in PR 5.
 func TestBackupCommand_Use(t *testing.T) {
-	if backupCmd.Use != "backup" {
-		t.Errorf("backupCmd.Use = %q, want %q", backupCmd.Use, "backup")
+	if backupCmd.Use != "backup [name]" {
+		t.Errorf("backupCmd.Use = %q, want %q", backupCmd.Use, "backup [name]")
 	}
 	if !strings.Contains(backupCmd.Short, "Backup") {
 		t.Errorf("backupCmd.Short = %q, want substring %q", backupCmd.Short, "Backup")
@@ -50,6 +51,7 @@ func setBackupRunner(t *testing.T, r podman.Runner) {
 func executeBackup(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	resetRoot()
+	resetBackupFlags()
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)
@@ -85,8 +87,8 @@ func TestBackup_EngineAvailable_NoArg_InteractiveSelection(t *testing.T) {
 		{ID: "id3", Names: []string{"c3"}, Image: "img3", Status: "running"},
 	}
 	setBackupRunner(t, &podman.FakeRunner{
-		VersionStr:   "podman version 5.0.0",
-		ListResult:   containers,
+		VersionStr:    "podman version 5.0.0",
+		ListResult:    containers,
 		InspectResult: podman.InspectResult{ID: "id2", Image: "img2"},
 	})
 	// Wire stdin so the interactive chooser reads "2\n".
@@ -133,8 +135,8 @@ func TestBackup_ExplicitName_SelectsDirectly(t *testing.T) {
 // reports as not found MUST exit non-zero and print "not found".
 func TestBackup_NotFound(t *testing.T) {
 	setBackupRunner(t, &podman.FakeRunner{
-		VersionStr:  "podman version 5.0.0",
-		InspectErr:  podman.ErrContainerNotFound,
+		VersionStr: "podman version 5.0.0",
+		InspectErr: podman.ErrContainerNotFound,
 	})
 	out, err := executeBackup(t, "nonexistent")
 	if err == nil {

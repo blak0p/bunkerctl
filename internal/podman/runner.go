@@ -37,6 +37,13 @@ var allowedSaveFormats = map[string]bool{
 	"oci-archive":    true,
 }
 
+// AllowedSaveFormat reports whether f is an accepted podman save --format
+// value (docker-archive or oci-archive). Exported so the cmd layer can
+// validate the --format CLI flag before any pipeline work.
+func AllowedSaveFormat(f string) bool {
+	return allowedSaveFormats[f]
+}
+
 // maxContainerNameLen is the Podman-imposed upper bound on container name/ID
 // length. Names longer than this are rejected defensively.
 const maxContainerNameLen = 256
@@ -95,6 +102,7 @@ func validateImageRef(ref string) error {
 	}
 	return nil
 }
+
 // Runner.List. Fields are filled in by later slices; this PR only declares
 // the shape.
 type Container struct {
