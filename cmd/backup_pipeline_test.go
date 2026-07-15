@@ -230,7 +230,7 @@ func TestBackup_E2E_IgnoreExtraAppearsInYAML(t *testing.T) {
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: "extra", Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:           fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n"),
+		ExecFn:           fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\n"),
 	}
 	setBackupRunner(t, r)
 
@@ -411,7 +411,7 @@ func TestBackup_Pipeline_CopyFailsAborts(t *testing.T) {
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: "copyfail", Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:            fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n"),
+		ExecFn:            fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\n"),
 	})
 	_, err := executeBackup(t, "--no-edit", "copyfail")
 	if err == nil {
@@ -434,7 +434,7 @@ func TestBackup_Pipeline_CompressFailsAborts(t *testing.T) {
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: "compfail", Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:            fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n"),
+		ExecFn:            fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\n"),
 	})
 	_, err := executeBackup(t, "--no-edit", "compfail")
 	if err == nil {
@@ -462,7 +462,7 @@ func TestBackup_Pipeline_EditorErrNoEditorAborts(t *testing.T) {
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: "noed", Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:            fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n"),
+		ExecFn:            fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\n"),
 	})
 	_, err := executeBackup(t, "noed") // no --no-edit
 	if err == nil {
@@ -479,7 +479,7 @@ func TestBackup_Pipeline_OutputMissingParentFails(t *testing.T) {
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: "x", Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:            fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n"),
+		ExecFn:            fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\n"),
 	})
 	_, err := executeBackup(t, "--no-edit", "--output="+missing, "x")
 	if err == nil {
@@ -571,7 +571,7 @@ func TestBackup_E2E_NoEditSkipsEditorCall(t *testing.T) {
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: "noedit", Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:           fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n"),
+		ExecFn:           fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\n"),
 	})
 	if _, err := executeBackup(t, "--no-edit", "noedit"); err != nil {
 		t.Fatalf("backup --no-edit error: %v", err)
@@ -595,7 +595,7 @@ func TestBackup_E2E_EditorInvokedWithoutNoEdit(t *testing.T) {
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: "edited", Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:            fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n"),
+		ExecFn:            fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\n"),
 	})
 	if _, err := executeBackup(t, "edited"); err != nil { // no --no-edit
 		t.Fatalf("backup error: %v", err)

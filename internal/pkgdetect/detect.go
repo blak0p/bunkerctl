@@ -5,8 +5,11 @@
 // with both name and version as the YAML manifest requires.
 //
 // DetectManager probes which of dnf/dnf5 is available and prefers dnf5
-// (REQ-DETECT-5). Each Detector runs the manager's `list installed` command
-// through podman.Runner so tests inject fakes.
+// (REQ-DETECT-5). DnfDetector runs `dnf list installed`; Dnf5Detector runs
+// `dnf5 repoquery --installed` (NOT `dnf5 list installed`, which returns exit
+// 1 with "No matching packages to list" on real Fedora 44/45 even when
+// packages are installed — repoquery reads the rpmdb directly and exits 0).
+// Each Detector runs through podman.Runner so tests inject fakes.
 package pkgdetect
 
 import (
@@ -42,34 +45,31 @@ type DnfDetector struct{}
 // NewDnfDetector returns a Detector for dnf.
 func NewDnfDetector() Detector { return &DnfDetector{} }
 
-// Dnf5Detector lists installed packages via `dnf5 list installed`.
+// Dnf5Detector lists installed packages via `dnf5 repoquery --installed`.
+// repoquery reads the rpmdb directly and returns one `name-epoch:version-
+// release.arch` line per installed package; unlike `dnf5 list installed`, it
+// exits 0 and returns the complete list on real Fedora 44/45.
 type Dnf5Detector struct{}
 
 // NewDnf5Detector returns a Detector for dnf5.
 func NewDnf5Detector() Detector { return &Dnf5Detector{} }
 
-// listCmd returns the in-container command for listing installed packages of
-// the manager.
-func listCmd(manager string) []string {
-	return []string{manager, "list", "installed"}
-}
-
 // Detect runs `dnf list installed` and parses the output into []Package.
 func (d *DnfDetector) Detect(ctx context.Context, runner podman.Runner, containerID string) ([]Package, error) {
-	out, err := runner.Exec(ctx, containerID, listCmd("dnf"))
+	out, err := runner.Exec(ctx, containerID, []string{"dnf", "list", "installed"})
 	if err != nil {
 		return nil, fmt.Errorf("running dnf list installed: %w", err)
 	}
 	return parseDnfList(out), nil
 }
 
-// Detect runs `dnf5 list installed` and parses the output into []Package.
+// Detect runs `dnf5 repoquery --installed` and parses the output into []Package.
 func (d *Dnf5Detector) Detect(ctx context.Context, runner podman.Runner, containerID string) ([]Package, error) {
-	out, err := runner.Exec(ctx, containerID, listCmd("dnf5"))
+	out, err := runner.Exec(ctx, containerID, []string{"dnf5", "repoquery", "--installed"})
 	if err != nil {
-		return nil, fmt.Errorf("running dnf5 list installed: %w", err)
+		return nil, fmt.Errorf("running dnf5 repoquery --installed: %w", err)
 	}
-	return parseDnfList(out), nil
+	return parseDnf5Repoquery(out), nil
 }
 
 // parseDnfList parses `dnf`/`dnf5 list installed` output. The format is:
@@ -102,6 +102,76 @@ func parseDnfList(out string) []Package {
 	return pkgs
 }
 
+// parseDnf5Repoquery parses `dnf5 repoquery --installed` output. The format is
+// one package per line, no header:
+//
+//	<name>-<epoch>:<version>-<release>.<arch>
+//
+// e.g. `neovim-0:0.10.2-1.fc44.x86_64` or `cups-filesystem-1:2.4.19-3.fc44.noarch`.
+//
+// Splitting strategy: the arch is the substring after the LAST dot; the
+// epoch:version-release is the segment between the package name and the arch.
+// The package name can contain dots and hyphens (e.g. python3.12,
+// apr-util-lmdb), so it cannot be split by those. Instead we locate the
+// epoch:version-release segment by finding the FIRST `:` in the line — every
+// repoquery line includes an explicit epoch (`0:` when zero). Everything before
+// the epoch segment's leading `-` is the name; the rest is version-release.
+func parseDnf5Repoquery(out string) []Package {
+	var pkgs []Package
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pkg, ok := parseDnf5RepoqueryLine(line)
+		if !ok {
+			continue
+		}
+		pkgs = append(pkgs, pkg)
+	}
+	return pkgs
+}
+
+// parseDnf5RepoqueryLine parses a single `name-epoch:version-release.arch`
+// line into a Package. Returns ok=false if the line does not contain an epoch
+// colon (not a valid repoquery row) or cannot be split into name + nvra.
+func parseDnf5RepoqueryLine(line string) (Package, bool) {
+	// Drop the arch suffix: split on the LAST dot.
+	nvra, _, ok := cutLast(line, ".")
+	if !ok || nvra == "" {
+		return Package{}, false
+	}
+	// nvra is now `name-epoch:version-release`. Find the epoch colon.
+	epochIdx := strings.Index(nvra, ":")
+	if epochIdx < 0 {
+		return Package{}, false
+	}
+	// The name is everything before the `-` that precedes the epoch. Search
+	// backwards from the colon for the `-` separating name from the epoch
+	// segment.
+	dashIdx := strings.LastIndex(nvra[:epochIdx], "-")
+	if dashIdx < 0 {
+		return Package{}, false
+	}
+	name := nvra[:dashIdx]
+	// version-release is everything after the epoch colon.
+	versionRelease := nvra[epochIdx+1:]
+	if name == "" || versionRelease == "" {
+		return Package{}, false
+	}
+	return Package{Name: name, Version: versionRelease}, true
+}
+
+// cutLast splits s at the LAST occurrence of sep into before and after. ok is
+// false if sep is not present.
+func cutLast(s, sep string) (before string, after string, ok bool) {
+	idx := strings.LastIndex(s, sep)
+	if idx < 0 {
+		return s, "", false
+	}
+	return s[:idx], s[idx+len(sep):], true
+}
+
 // stripArch removes the .arch suffix from a "name.arch" package column. It
 // splits on the LAST dot so names containing dots (e.g. "python3.12") keep
 // their internal dots.
@@ -116,8 +186,8 @@ func stripArch(nameArch string) string {
 // managerProbeOrder is the order DetectManager probes managers. dnf5 is probed
 // FIRST so it is preferred when both are present (REQ-DETECT-5).
 var managerProbeOrder = []struct {
-	Manager packages.Manager
-	Bin     string
+	Manager         packages.Manager
+	Bin             string
 	DetectorFactory func() Detector
 }{
 	{Manager: packages.ManagerDnf5, Bin: "dnf5", DetectorFactory: NewDnf5Detector},

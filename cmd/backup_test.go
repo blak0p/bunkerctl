@@ -93,8 +93,8 @@ func TestBackup_EngineAvailable_NoArg_InteractiveSelection(t *testing.T) {
 				return "ID=fedora\nVERSION_ID=45\n", nil
 			case "which dnf5", "which dnf":
 				return "", nil
-			case "dnf5 list installed", "dnf list installed":
-				return "Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n", nil
+			case "dnf5 repoquery --installed", "dnf list installed":
+				return "neovim-0:0.10.2-1.fc40.x86_64\n", nil
 			}
 			return "", nil
 		},
@@ -131,8 +131,8 @@ func TestBackup_ExplicitName_SelectsDirectly(t *testing.T) {
 				return "ID=fedora\nVERSION_ID=45\n", nil
 			case "which dnf5", "which dnf":
 				return "", nil
-			case "dnf5 list installed", "dnf list installed":
-				return "Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n", nil
+			case "dnf5 repoquery --installed", "dnf list installed":
+				return "neovim-0:0.10.2-1.fc40.x86_64\n", nil
 			}
 			return "", nil
 		},
@@ -229,8 +229,8 @@ func TestBackup_EngineAvailable_TriangulateVersion(t *testing.T) {
 				return "ID=fedora\nVERSION_ID=45\n", nil
 			case "which dnf5", "which dnf":
 				return "", nil
-			case "dnf5 list installed", "dnf list installed":
-				return "Installed Packages\nfish.x86_64 3.7.0-1.fc40 @repo\n", nil
+			case "dnf5 repoquery --installed", "dnf list installed":
+				return "fish-0:3.7.0-1.fc40.x86_64\n", nil
 			}
 			return "", nil
 		},

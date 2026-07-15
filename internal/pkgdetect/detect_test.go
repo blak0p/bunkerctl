@@ -44,11 +44,22 @@ neovim.x86_64                 0.10.2-1.fc40            @fedora
 fish.x86_64                   3.7.0-1.fc40             @fedora
 ripgrep.x86_64                14.1.0-1.fc40            @fedora`
 
-// cannedDnf5ListInstalled is realistic `dnf5 list installed` output, same
-// shape as dnf (dnf5 reuses the list installed format).
-const cannedDnf5ListInstalled = `Installed Packages
-neovim.x86_64                 0.10.2-1.fc40            @system
-fish.x86_64                   3.7.0-1.fc40             @system`
+// cannedDnf5RepoqueryInstalled is realistic `dnf5 repoquery --installed`
+// output, captured from the real Fedora 44 container. The format is
+// `name-epoch:version-release.arch`, one package per line (no header). Epoch
+// is `0:` for most packages and non-zero (e.g. `1:`) for a few. Several
+// packages ship multiple arches (i686 + x86_64) and appear once per arch.
+const cannedDnf5RepoqueryInstalled = `7zip-0:26.02-1.fc44.x86_64
+apr-util-0:1.6.3-27.fc44.x86_64
+apr-util-lmdb-0:1.6.3-27.fc44.x86_64
+bash-0:5.3.9-3.fc44.x86_64
+cups-filesystem-1:2.4.19-3.fc44.noarch
+dbus-1:1.16.2-1.fc44.x86_64
+fish-0:4.6.0-1.fc44.x86_64
+glibc-0:2.43-7.fc44.i686
+glibc-0:2.43-7.fc44.x86_64
+neovim-0:0.10.2-1.fc44.x86_64
+python3.12-0:3.12.6-1.fc44.x86_64`
 
 // --- DnfDetector ---
 
@@ -133,21 +144,121 @@ func TestDnfDetector_ExecFails(t *testing.T) {
 
 // --- Dnf5Detector ---
 
-// TestDnf5Detector_ParsesListInstalled verifies Dnf5Detector runs the dnf5 list
-// command and parses name+version.
-func TestDnf5Detector_ParsesListInstalled(t *testing.T) {
+// TestDnf5Detector_ParsesRepoqueryInstalled verifies Dnf5Detector runs
+// `dnf5 repoquery --installed` (NOT `dnf5 list installed`, which returns exit 1
+// with "No matching packages" on real Fedora 44/45) and parses name+version
+// from the `name-epoch:version-release.arch` output. Covers: epoch=0 and
+// non-zero epoch, hyphenated names, dotted names, and multi-arch duplicates.
+func TestDnf5Detector_ParsesRepoqueryInstalled(t *testing.T) {
 	r := newFakeRunner()
-	r.execOut["dnf5 list installed"] = cannedDnf5ListInstalled
+	r.execOut["dnf5 repoquery --installed"] = cannedDnf5RepoqueryInstalled
 	d := NewDnf5Detector()
 	pkgs, err := d.Detect(context.Background(), r, "bunker5")
 	if err != nil {
 		t.Fatalf("Dnf5Detector.Detect error: %v", err)
 	}
-	if len(pkgs) != 2 {
-		t.Fatalf("len = %d, want 2", len(pkgs))
+	if len(pkgs) != 11 {
+		t.Fatalf("len = %d, want 11 (one per line incl. multi-arch)", len(pkgs))
 	}
-	if pkgs[0].Name != "neovim" || pkgs[0].Version != "0.10.2-1.fc40" {
-		t.Errorf("pkgs[0] = %+v, want {neovim 0.10.2-1.fc40}", pkgs[0])
+	wantByName := map[string]string{
+		"7zip":             "26.02-1.fc44",
+		"apr-util":         "1.6.3-27.fc44",
+		"apr-util-lmdb":    "1.6.3-27.fc44",
+		"bash":             "5.3.9-3.fc44",
+		"cups-filesystem":  "2.4.19-3.fc44",
+		"dbus":             "1.16.2-1.fc44",
+		"fish":             "4.6.0-1.fc44",
+		"glibc":            "2.43-7.fc44",
+		"neovim":           "0.10.2-1.fc44",
+		"python3.12":       "3.12.6-1.fc44",
+	}
+	gotByName := map[string]string{}
+	for _, p := range pkgs {
+		gotByName[p.Name] = p.Version
+	}
+	for name, wantVer := range wantByName {
+		if gotVer, ok := gotByName[name]; !ok {
+			t.Errorf("missing package %q", name)
+		} else if gotVer != wantVer {
+			t.Errorf("version for %q = %q, want %q", name, gotVer, wantVer)
+		}
+	}
+	// Non-zero epoch (cups-filesystem has epoch=1): epoch must NOT leak into
+	// the version string. Version is `version-release` only.
+	for _, p := range pkgs {
+		if strings.Contains(p.Version, ":") {
+			t.Errorf("version %q for %q contains epoch colon; want version-release only", p.Version, p.Name)
+		}
+	}
+}
+
+// TestDnf5Detector_StripsArchAndEpoch verifies a single repoquery line is
+// split correctly: arch suffix removed, epoch prefix removed, version is
+// version-release.
+func TestDnf5Detector_StripsArchAndEpoch(t *testing.T) {
+	r := newFakeRunner()
+	r.execOut["dnf5 repoquery --installed"] = "cups-filesystem-1:2.4.19-3.fc44.noarch"
+	d := NewDnf5Detector()
+	pkgs, err := d.Detect(context.Background(), r, "bunker5")
+	if err != nil {
+		t.Fatalf("Detect error: %v", err)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("len = %d, want 1", len(pkgs))
+	}
+	if pkgs[0].Name != "cups-filesystem" {
+		t.Errorf("Name = %q, want cups-filesystem (arch stripped, name keeps hyphens)", pkgs[0].Name)
+	}
+	if pkgs[0].Version != "2.4.19-3.fc44" {
+		t.Errorf("Version = %q, want 2.4.19-3.fc44 (epoch stripped)", pkgs[0].Version)
+	}
+}
+
+// TestDnf5Detector_DottedNameKeepsDots verifies a package name with internal
+// dots (python3.12) is not split on those dots.
+func TestDnf5Detector_DottedNameKeepsDots(t *testing.T) {
+	r := newFakeRunner()
+	r.execOut["dnf5 repoquery --installed"] = "python3.12-0:3.12.6-1.fc44.x86_64"
+	d := NewDnf5Detector()
+	pkgs, err := d.Detect(context.Background(), r, "bunker5")
+	if err != nil {
+		t.Fatalf("Detect error: %v", err)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("len = %d, want 1", len(pkgs))
+	}
+	if pkgs[0].Name != "python3.12" {
+		t.Errorf("Name = %q, want python3.12 (internal dot preserved)", pkgs[0].Name)
+	}
+	if pkgs[0].Version != "3.12.6-1.fc44" {
+		t.Errorf("Version = %q, want 3.12.6-1.fc44", pkgs[0].Version)
+	}
+}
+
+// TestDnf5Detector_EmptyOutput verifies empty/whitespace repoquery output
+// yields an empty (non-nil) slice with no error.
+func TestDnf5Detector_EmptyOutput(t *testing.T) {
+	r := newFakeRunner()
+	r.execOut["dnf5 repoquery --installed"] = "\n\n"
+	d := NewDnf5Detector()
+	pkgs, err := d.Detect(context.Background(), r, "bunker5")
+	if err != nil {
+		t.Fatalf("Detect error: %v", err)
+	}
+	if len(pkgs) != 0 {
+		t.Errorf("len = %d, want 0 for empty output", len(pkgs))
+	}
+}
+
+// TestDnf5Detector_ExecFails verifies an exec error surfaces (e.g. dnf5 not
+// present or repoquery unsupported).
+func TestDnf5Detector_ExecFails(t *testing.T) {
+	r := newFakeRunner()
+	r.execErr["dnf5 repoquery --installed"] = errors.New("dnf5: command not found")
+	d := NewDnf5Detector()
+	_, err := d.Detect(context.Background(), r, "bunker5")
+	if err == nil {
+		t.Fatalf("Detect(dnf5 missing) err = nil, want error")
 	}
 }
 

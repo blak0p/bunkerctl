@@ -21,9 +21,11 @@ import (
 var errFakeNonZero = errors.New("fake non-zero exit")
 
 // fedoraExecFn returns an ExecFn that fakes a Fedora 45 single-user container
-// with the given dnf/dnf5 package list. It is shared by the E2E + regression
-// tests so they all drive the same canned container shape.
-func fedoraExecFn(dnfList string) func(ctx context.Context, id string, cmd []string) (string, error) {
+// with the given dnf5 repoquery package list. It is shared by the E2E +
+// regression tests so they all drive the same canned container shape.
+// dnf5List is the output of `dnf5 repoquery --installed` (one
+// `name-epoch:version-release.arch` line per package).
+func fedoraExecFn(dnf5List string) func(ctx context.Context, id string, cmd []string) (string, error) {
 	return func(ctx context.Context, id string, cmd []string) (string, error) {
 		switch strings.Join(cmd, " ") {
 		case "getent passwd 1000":
@@ -36,8 +38,8 @@ func fedoraExecFn(dnfList string) func(ctx context.Context, id string, cmd []str
 			return "", nil
 		case "which dnf":
 			return "", errFakeNonZero // dnf5 preferred; dnf absent
-		case "dnf5 list installed":
-			return dnfList, nil
+		case "dnf5 repoquery --installed":
+			return dnf5List, nil
 		case "rm -rf /var/cache/dnf":
 			return "", nil
 		}
@@ -64,7 +66,7 @@ func runFullBackup(t *testing.T, name string, extraArgs ...string) (*podman.Fake
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: name, Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:           fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\nfish.x86_64 3.7.0-1.fc40 @repo\n"),
+		ExecFn:           fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\nfish-0:3.7.0-1.fc40.x86_64\n"),
 	}
 	setBackupRunner(t, r)
 
@@ -102,7 +104,7 @@ func TestBackup_E2E_SentinelFileProvesContainerSideCopy(t *testing.T) {
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: "bunker", Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:           fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n"),
+		ExecFn:           fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\n"),
 	}
 	setBackupRunner(t, r)
 
@@ -398,7 +400,7 @@ func TestBackup_E2E_EditorNonZeroExitAborts(t *testing.T) {
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: "aborted", Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:           fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n"),
+		ExecFn:           fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\n"),
 	})
 	_, err := executeBackup(t, "aborted") // no --no-edit → editor runs
 	if err == nil {
@@ -429,7 +431,7 @@ func TestBackup_E2E_DefaultOutputPath(t *testing.T) {
 		VersionStr:       "podman version 5.0.0",
 		InspectResult:    podman.InspectResult{ID: "mybunker", Image: "fedora:45"},
 		InspectRawResult: fedoraInspectRaw,
-		ExecFn:           fedoraExecFn("Installed Packages\nneovim.x86_64 0.10.2-1.fc40 @repo\n"),
+		ExecFn:           fedoraExecFn("neovim-0:0.10.2-1.fc40.x86_64\n"),
 	})
 	out, err := executeBackup(t, "--no-edit", "mybunker")
 	if err != nil {
