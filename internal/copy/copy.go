@@ -3,10 +3,13 @@
 // v0.1.0 host-side preserve-list bug (REQ-COPY-1): bytes originate from the
 // container, never from the host filesystem.
 //
-// DefaultCopier runs `podman exec <id> tar -cf - -C <home> --exclude-from <f> .`
+// DefaultCopier runs
+// `podman exec <id> sh -c 'tar -cf - -C <home> --exclude-from <f> . 2>/dev/null'`
 // through podman.Runner.Exec, captures the tar bytes, writes them to a temp
 // file, and extracts them with the host `tar -xf -` into <staging>/files. The
-// ignore list is written to a temp file and passed via --exclude-from so the
+// stderr redirect is required because Runner.Exec returns CombinedOutput and tar
+// warnings such as "socket ignored" would otherwise corrupt the archive stream.
+// The ignore list is written to a temp file and passed via --exclude-from so the
 // filtering happens container-side (REQ-COPY-2). After extraction, the total
 // bytes are measured; a warning is returned if they exceed 500MB (REQ-COPY-3).
 package copy
@@ -23,6 +26,17 @@ import (
 
 	"github.com/blak0p/bunkerctl/internal/podman"
 )
+
+// shellQuote returns a single-quoted shell literal for s. If s contains a
+// single quote, it is escaped by ending the quoted string, injecting an
+// escaped quote, and resuming the quote: that's the only special character
+// inside single-quoted POSIX strings.
+func shellQuote(s string) string {
+	if !strings.Contains(s, "'") {
+		return "'" + s + "'"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 // largeCopyThreshold is the byte count above which Copy returns a warning
 // (REQ-COPY-3). 500 MB.
@@ -60,10 +74,11 @@ type DefaultCopier struct {
 // Compile-time guarantee.
 var _ Copier = DefaultCopier{}
 
-// Copy runs `podman exec <id> tar -cf - -C <home> --exclude-from <f> .`, writes
-// the captured tar bytes to a temp file, and extracts them into opts.StagingDir
-// using the host `tar -xf -`. It returns the total extracted bytes and a
-// warning if they exceed 500MB (REQ-COPY-3).
+// Copy runs
+// `podman exec <id> sh -c 'tar -cf - -C <home> --exclude-from <f> . 2>/dev/null'`,
+// writes the captured tar bytes to a temp file, and extracts them into
+// opts.StagingDir using the host `tar -xf -`. It returns the total extracted
+// bytes and a warning if they exceed 500MB (REQ-COPY-3).
 func (c DefaultCopier) Copy(ctx context.Context, runner podman.Runner, containerID string, opts CopyOptions) (CopyResult, error) {
 	if opts.StagingDir == "" {
 		return CopyResult{}, fmt.Errorf("%w: empty staging dir", ErrCopyFailed)
@@ -75,24 +90,30 @@ func (c DefaultCopier) Copy(ctx context.Context, runner podman.Runner, container
 		return CopyResult{}, fmt.Errorf("%w: creating staging dir: %v", ErrCopyFailed, err)
 	}
 
-	// Build the tar command. The ignore list is written to a temp file and
-	// passed via --exclude-from so filtering happens container-side.
-	var excludeFile string
-	cmd := []string{"tar", "-cf", "-", "-C", opts.Home}
+	// Build the tar command inside a shell so we can redirect stderr to
+	// /dev/null. podman exec runs commands without a shell by default, so we
+	// wrap the tar invocation in `sh -c '... 2>/dev/null'`. This prevents tar
+	// warnings (e.g. "socket ignored") from corrupting the tar byte stream
+	// captured via Runner.Exec, which returns CombinedOutput.
+	var shellCmd strings.Builder
+	shellCmd.WriteString("tar -cf - -C ")
+	shellCmd.WriteString(shellQuote(opts.Home))
 	if len(opts.Ignore) > 0 {
 		ef, err := writeExcludeFile(opts.Ignore)
 		if err != nil {
 			return CopyResult{}, fmt.Errorf("%w: writing exclude file: %v", ErrCopyFailed, err)
 		}
 		defer os.Remove(ef)
-		excludeFile = ef
-		cmd = append(cmd, "--exclude-from", ef)
+		shellCmd.WriteString(" --exclude-from ")
+		shellCmd.WriteString(shellQuote(ef))
 	}
-	cmd = append(cmd, ".")
+	shellCmd.WriteString(" . 2>/dev/null")
+	cmd := []string{"sh", "-c", shellCmd.String()}
 
 	// Execute inside the container. Runner.Exec returns the tar bytes as a
 	// string; Go strings are byte-sequences, so []byte(out) is lossless even
-	// for binary tar content.
+	// for binary tar content. Because stderr is discarded inside the
+	// container, only the tar stream reaches us.
 	out, err := runner.Exec(ctx, containerID, cmd)
 	if err != nil {
 		return CopyResult{}, fmt.Errorf("%w: podman exec tar: %v", ErrCopyFailed, err)
@@ -126,7 +147,6 @@ func (c DefaultCopier) Copy(ctx context.Context, runner podman.Runner, container
 	if bytes > largeCopyThreshold {
 		res.Warning = fmt.Sprintf("warning: copy exceeds 500MB (%d bytes); continuing", bytes)
 	}
-	_ = excludeFile // referenced in cmd above; keep for clarity.
 	return res, nil
 }
 

@@ -35,10 +35,11 @@ var defaultPatterns = []string{
 	"venv",
 	"*.log",
 	"*.tmp",
+	"*.sock",
 	"/tmp",
 }
 
-// DefaultPatterns returns a copy of the 15 default ignore patterns (REQ-COPY-4).
+// DefaultPatterns returns a copy of the 16 default ignore patterns (REQ-COPY-4).
 // The returned slice is safe to mutate without affecting the package default.
 func DefaultPatterns() []string {
 	out := make([]string, len(defaultPatterns))

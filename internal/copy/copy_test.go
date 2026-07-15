@@ -40,11 +40,18 @@ func (r *captureRunner) Exec(ctx context.Context, id string, cmd []string) (stri
 	copy(cp, cmd)
 	r.execCmd = cp
 	r.execCalls = append(r.execCalls, cp)
-	// Capture the exclude-from file content while it still exists.
-	for i, a := range cmd {
-		if a == "--exclude-from" && i+1 < len(cmd) {
-			if data, err := os.ReadFile(cmd[i+1]); err == nil {
-				r.excludeFileContent = string(data)
+	// Capture the exclude-from file content while it still exists. The path
+	// is inside the shell script (cmd[2]) when present.
+	if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" {
+		script := cmd[2]
+		idx := strings.Index(script, "--exclude-from '")
+		if idx != -1 {
+			start := idx + len("--exclude-from '")
+			if end := strings.Index(script[start:], "'"); end != -1 {
+				path := script[start : start+end]
+				if data, err := os.ReadFile(path); err == nil {
+					r.excludeFileContent = string(data)
+				}
 			}
 		}
 	}
@@ -118,33 +125,27 @@ func TestCopy_ExecutesPodmanExecTar(t *testing.T) {
 		t.Fatalf("no exec calls recorded; expected a tar command")
 	}
 	got := r.execCalls[0]
-	// The command must be a tar invocation starting with the home and exclude.
-	if len(got) < 4 {
+	// The command must be wrapped in `sh -c` because we need shell redirects.
+	if len(got) < 3 {
 		t.Fatalf("exec cmd = %v, too short", got)
 	}
-	if got[0] != "tar" {
-		t.Errorf("cmd[0] = %q, want \"tar\"", got[0])
+	if got[0] != "sh" || got[1] != "-c" {
+		t.Errorf("cmd[0:2] = %v, want [\"sh\" \"-c\"]", got[:2])
 	}
-	// Must contain -C <home>.
-	foundC := false
-	for i, a := range got {
-		if a == "-C" && i+1 < len(got) && got[i+1] == "/home/alejndro" {
-			foundC = true
-		}
+	script := got[2]
+	if !strings.Contains(script, "tar -cf -") {
+		t.Errorf("script %q missing tar -cf -", script)
 	}
-	if !foundC {
-		t.Errorf("cmd %v: missing -C /home/alejndro", got)
+	if !strings.Contains(script, "2>/dev/null") {
+		t.Errorf("script %q missing stderr redirect", script)
 	}
-	// Must contain --exclude-from <tmpfile>.
-	foundExclude := false
-	for _, a := range got {
-		if a == "--exclude-from" {
-			foundExclude = true
-			break
-		}
+	// The shell script must contain -C <home>.
+	if !strings.Contains(script, "-C '/home/alejndro'") {
+		t.Errorf("script %q missing -C /home/alejndro", script)
 	}
-	if !foundExclude {
-		t.Errorf("cmd %v: missing --exclude-from (REQ-COPY-2)", got)
+	// The shell script must contain --exclude-from with a temp file path.
+	if !strings.Contains(script, "--exclude-from '") {
+		t.Errorf("script %q missing --exclude-from (REQ-COPY-2)", script)
 	}
 }
 
@@ -172,7 +173,7 @@ func TestCopy_PropagatesIgnorePatterns(t *testing.T) {
 	// (Copy removes the temp file via defer after Exec returns).
 	data := r.excludeFileContent
 	if data == "" {
-		t.Fatalf("exclude file content not captured; cmd was %v", r.execCalls[0])
+		t.Fatalf("exclude file content not captured; cmd was %v; script was %q", r.execCalls[0], r.execCalls[0][2])
 	}
 	for _, p := range ignore {
 		if !strings.Contains(data, p) {
@@ -357,10 +358,69 @@ func TestCopy_EmptyIgnoreStillWorks(t *testing.T) {
 	}
 	// With no ignore patterns, --exclude-from should be absent.
 	got := r.execCalls[0]
-	for _, a := range got {
-		if a == "--exclude-from" {
-			t.Errorf("cmd %v: --exclude-from present with empty ignore", got)
-		}
+	if len(got) < 3 {
+		t.Fatalf("exec cmd = %v, too short", got)
+	}
+	script := got[2]
+	if strings.Contains(script, "--exclude-from") {
+		t.Errorf("script %q: --exclude-from present with empty ignore", script)
+	}
+}
+
+// TestCopy_DiscardsStderr is the regression test for tar warnings corrupting
+// the archive stream. The fake runner returns a valid tar stream that, in a
+// pre-fix world, would be polluted by stderr text ("socket ignored"). Because
+// the copier now runs `sh -c 'tar ... 2>/dev/null'`, any text that would have
+// been on stderr is not present in the runner's output, so host extraction
+// succeeds. This test simulates the corrupted stream by prepending the warning
+// text and proving that the current implementation cannot be affected at the
+// runner boundary: the only bytes reaching the host are the ones returned by
+// Exec. The fix makes that stream clean by construction.
+func TestCopy_DiscardsStderr(t *testing.T) {
+	clean := makeTarStream(t, "safe.txt", "safe")
+	corrupted := "tar: ./herdr.sock: socket ignored\n" + clean
+	r := &captureRunner{FakeRunner: &podman.FakeRunner{}, tarOut: corrupted}
+	staging := t.TempDir()
+	filesDir := filepath.Join(staging, "files")
+	if err := os.MkdirAll(filesDir, 0o755); err != nil {
+		t.Fatalf("mkdir files: %v", err)
+	}
+	c := DefaultCopier{}
+	_, err := c.Copy(context.Background(), r, "bunker", CopyOptions{
+		Home:       "/home/u",
+		Ignore:     []string{},
+		StagingDir: filesDir,
+	})
+	// With corrupted input (the pre-fix failure mode) extraction fails.
+	if err == nil {
+		t.Fatalf("Copy err = nil, want error when tar stream is corrupted; fix failed to isolate stderr")
+	}
+
+	// Now prove that the same clean stream extracts successfully.
+	r2 := &captureRunner{FakeRunner: &podman.FakeRunner{}, tarOut: clean}
+	filesDir2 := filepath.Join(t.TempDir(), "files")
+	if err := os.MkdirAll(filesDir2, 0o755); err != nil {
+		t.Fatalf("mkdir files: %v", err)
+	}
+	if _, err := c.Copy(context.Background(), r2, "bunker", CopyOptions{
+		Home:       "/home/u",
+		Ignore:     []string{},
+		StagingDir: filesDir2,
+	}); err != nil {
+		t.Fatalf("Copy error with clean stream: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(filesDir2, "safe.txt"))
+	if err != nil {
+		t.Fatalf("reading safe.txt: %v", err)
+	}
+	if string(got) != "safe" {
+		t.Errorf("safe.txt = %q, want \"safe\"", got)
+	}
+
+	// The issued command must redirect stderr inside the container shell.
+	script := r2.execCalls[0][2]
+	if !strings.Contains(script, "2>/dev/null") {
+		t.Errorf("script %q missing stderr redirect", script)
 	}
 }
 

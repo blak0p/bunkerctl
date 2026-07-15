@@ -25,10 +25,11 @@ func TestDefaultPatterns_Contents(t *testing.T) {
 		"venv",
 		"*.log",
 		"*.tmp",
+		"*.sock",
 		"/tmp",
 	}
-	if len(got) != 15 {
-		t.Fatalf("DefaultPatterns len = %d, want 15", len(got))
+	if len(got) != 16 {
+		t.Fatalf("DefaultPatterns len = %d, want 16", len(got))
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("DefaultPatterns = %v\nwant            = %v", got, want)
@@ -58,9 +59,11 @@ func TestMatcher_ShouldIgnore(t *testing.T) {
 		// Directory skip (whole tree under an ignored dir).
 		{".cache/opera/cache/C_01", true, "dir skip"},
 		{".cache", true, "dir root"},
-		// Glob *.log and *.tmp.
+		// Glob *.log, *.tmp, and *.sock.
 		{"app.log", true, "glob *.log"},
 		{"logs/build.tmp", true, "glob *.tmp in subdir"},
+		{"herdr.sock", true, "glob *.sock"},
+		{".config/herdr/herdr-client.sock", true, "glob *.sock in subdir"},
 		{"notes.md", false, "non-matching glob"},
 		// Literal directory names anywhere in the path.
 		{"projects/app/node_modules/react", true, "literal node_modules"},
