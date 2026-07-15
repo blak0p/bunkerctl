@@ -343,6 +343,120 @@ alejndro:x:1000:1000:Alejndro:/home/alejndro:/bin/bash
 	}
 }
 
+// --- ResolveUser (REQ-DETECT-2, REQ-DETECT-3) ---
+
+func TestResolveUser(t *testing.T) {
+	const alejndroFish = "alejndro:x:1000:1000:Alejndro:/home/alejndro/dev/.container:/usr/bin/fish"
+
+	tests := []struct {
+		name         string
+		configUser   string
+		getentPasswd string
+		want         UserInfo
+		wantErr      error
+	}{
+		{
+			name:         "config root but one real user prefers real user",
+			configUser:   "root",
+			getentPasswd: "root:x:0:0:root:/root:/bin/bash\n" + alejndroFish,
+			want:         UserInfo{Name: "alejndro", UID: 1000, GID: 1000, Home: "/home/alejndro/dev/.container", Shell: "/usr/bin/fish"},
+		},
+		{
+			name:         "empty config user treated as root prefers real user",
+			configUser:   "",
+			getentPasswd: "root:x:0:0:root:/root:/bin/bash\n" + alejndroFish,
+			want:         UserInfo{Name: "alejndro", UID: 1000, GID: 1000, Home: "/home/alejndro/dev/.container", Shell: "/usr/bin/fish"},
+		},
+		{
+			name:         "config root:root prefers real user",
+			configUser:   "root:root",
+			getentPasswd: "root:x:0:0:root:/root:/bin/bash\n" + alejndroFish,
+			want:         UserInfo{Name: "alejndro", UID: 1000, GID: 1000, Home: "/home/alejndro/dev/.container", Shell: "/usr/bin/fish"},
+		},
+		{
+			name:       "config root and zero real users falls back to root",
+			configUser: "root",
+			getentPasswd: `root:x:0:0:root:/root:/bin/bash
+bin:x:1:1:bin:/bin:/sbin/nologin
+`,
+			want: UserInfo{Name: "root", UID: 0, GID: 0, Home: "/root", Shell: "/bin/bash"},
+		},
+		{
+			name:       "config root and two real users returns ambiguous multi-user error",
+			configUser: "root",
+			getentPasswd: `root:x:0:0:root:/root:/bin/bash
+alice:x:1000:1000:Alice:/home/alice:/bin/bash
+bob:x:1001:1001:Bob:/home/bob:/usr/bin/fish
+`,
+			wantErr: ErrMultiUserAmbiguous,
+		},
+		{
+			name:         "explicit numeric UID matching real user uses that user",
+			configUser:   "1000",
+			getentPasswd: alejndroFish,
+			want:         UserInfo{Name: "alejndro", UID: 1000, GID: 1000, Home: "/home/alejndro/dev/.container", Shell: "/usr/bin/fish"},
+		},
+		{
+			name:         "explicit username matching real user resolves via getent",
+			configUser:   "alejndro",
+			getentPasswd: alejndroFish,
+			want:         UserInfo{Name: "alejndro", UID: 1000, GID: 1000, Home: "/home/alejndro/dev/.container", Shell: "/usr/bin/fish"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newFakeRunner()
+			r.execOut["getent passwd"] = tt.getentPasswd
+			// Prime individual getent lookups by the uid/name when needed.
+			if tt.configUser == "alejndro" {
+				r.execOut["getent passwd alejndro"] = alejndroFish
+			}
+			if tt.configUser == "1000" {
+				r.execOut["getent passwd 1000"] = alejndroFish
+			}
+			if tt.configUser == "root" {
+				r.execOut["getent passwd 0"] = "root:x:0:0:root:/root:/bin/bash"
+			}
+
+			got, err := ResolveUser(context.Background(), r, "bunker", tt.configUser)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ResolveUser err = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantErr != nil {
+				return
+			}
+			if got != tt.want {
+				t.Errorf("ResolveUser = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveUser_MultiUserErrorCarriesRealUsers verifies the ambiguous
+// multi-user error embeds the detected real users for a future chooser.
+func TestResolveUser_MultiUserErrorCarriesRealUsers(t *testing.T) {
+	r := newFakeRunner()
+	r.execOut["getent passwd"] = `root:x:0:0:root:/root:/bin/bash
+alice:x:1000:1000:Alice:/home/alice:/bin/bash
+bob:x:1001:1001:Bob:/home/bob:/usr/bin/fish
+`
+	_, err := ResolveUser(context.Background(), r, "shared", "root")
+	if err == nil {
+		t.Fatalf("ResolveUser err = nil, want error")
+	}
+	var merr *MultiUserError
+	if !errors.As(err, &merr) {
+		t.Fatalf("error %v is not *MultiUserError", err)
+	}
+	if len(merr.RealUsers) != 2 {
+		t.Fatalf("RealUsers len = %d, want 2", len(merr.RealUsers))
+	}
+	if merr.RealUsers[0].Name != "alice" || merr.RealUsers[1].Name != "bob" {
+		t.Errorf("RealUsers = %v, want [alice bob]", merr.RealUsers)
+	}
+}
+
 // --- DetectBase: os-release parsing (REQ-YAML-3) ---
 
 // TestDetectBase_Fedora verifies the happy path: /etc/os-release with ID=fedora

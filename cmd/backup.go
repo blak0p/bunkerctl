@@ -251,13 +251,12 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Detect user + multi-user guard (REQ-DETECT-2, REQ-DETECT-3, REQ-ERR-3).
-	uid := inspect.UIDFromUser(inspectData.User)
-	if err := inspect.DetectMultiUser(ctx, runner, name); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "error: %v\n", err)
-		return err
-	}
-	userInfo, err := inspect.DetectUser(ctx, runner, name, uid)
+	userInfo, err := inspect.ResolveUser(ctx, runner, name, inspectData.User)
 	if err != nil {
+		if errors.Is(err, inspect.ErrMultiUserAmbiguous) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "error: ambiguous user: %v\n", err)
+			return err
+		}
 		fmt.Fprintf(cmd.ErrOrStderr(), "error: detecting user: %v\n", err)
 		return err
 	}
