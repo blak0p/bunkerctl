@@ -15,10 +15,11 @@ import (
 // (REQ-DETECT-3). When only the fallback (echo $HOME) succeeds, Name/GID are
 // empty and UID is preserved from the input.
 type UserInfo struct {
-	Name string
-	UID  int
-	GID  int
-	Home string
+	Name  string
+	UID   int
+	GID   int
+	Home  string
+	Shell string
 }
 
 // ErrMultiUser is returned by DetectMultiUser when more than one non-system
@@ -77,17 +78,50 @@ func parsePasswdLine(line string) (UserInfo, error) {
 		return UserInfo{}, fmt.Errorf("non-numeric gid %q: %w", fields[3], err)
 	}
 	return UserInfo{
-		Name: fields[0],
-		UID:  uid,
-		GID:  gid,
-		Home: fields[5],
+		Name:  fields[0],
+		UID:   uid,
+		GID:   gid,
+		Home:  fields[5],
+		Shell: fields[6],
 	}, nil
 }
 
-// DetectMultiUser checks whether the container has more than one non-system
-// user (UID >= 1000 with a non-empty home directory). It runs `getent passwd`
-// (no uid arg) and counts matching lines. Returns nil if single-user or no
-// non-system users; returns ErrMultiUser if more than one (REQ-ERR-3).
+// nonRealShells are login shells that indicate a service/system account, not a
+// human user. A user is a "real user" only if its shell is NOT in this set.
+var nonRealShells = map[string]bool{
+	"":                 true, // empty shell
+	"/usr/sbin/nologin": true,
+	"/sbin/nologin":    true,
+	"/bin/false":       true,
+	"/usr/bin/false":   true,
+	"/bin/true":        true,
+	"/usr/bin/true":    true,
+}
+
+// nonRealHomes are home directories that indicate a system account, not a real
+// user. A user is a "real user" only if its home is NOT in this set.
+var nonRealHomes = map[string]bool{
+	"":             true, // empty home
+	"/":            true,
+	"/nonexistent": true,
+}
+
+// isRealUser reports whether a parsed passwd entry represents a genuine human
+// user rather than a system/service account. A real user has ALL of: UID >= 1000,
+// a real login shell (not nologin/false/true/empty), and a real home directory
+// (not /, /nonexistent, or empty). Counting on UID alone is wrong because real
+// Fedora containers carry 20+ system users (nobody at UID 65534, unbound,
+// systemd-coredump, etc.) whose shells/homes disqualify them.
+func isRealUser(info UserInfo) bool {
+	return info.UID >= 1000 && !nonRealShells[info.Shell] && !nonRealHomes[info.Home]
+}
+
+// DetectMultiUser checks whether the container has more than one real user. A
+// "real user" requires UID >= 1000 AND a real login shell AND a real home
+// directory; system/service accounts (nologin/false/true shells, / or
+// /nonexistent homes) are excluded. It runs `getent passwd` (no uid arg) and
+// counts matching lines. Returns nil if single-user or no real users; returns
+// ErrMultiUser if more than one (REQ-ERR-3).
 func DetectMultiUser(ctx context.Context, runner podman.Runner, name string) error {
 	out, err := runner.Exec(ctx, name, []string{"getent", "passwd"})
 	if err != nil {
@@ -100,7 +134,7 @@ func DetectMultiUser(ctx context.Context, runner podman.Runner, name string) err
 		if perr != nil {
 			continue
 		}
-		if info.UID >= 1000 && info.Home != "" {
+		if isRealUser(info) {
 			count++
 		}
 	}

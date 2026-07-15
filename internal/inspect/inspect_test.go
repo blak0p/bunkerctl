@@ -270,6 +270,79 @@ root:x:0:0:root:/root:/bin/bash
 	}
 }
 
+// fedoraGetentPasswd is a realistic getent passwd dump from a Fedora 45
+// container: 22 entries, only one real user (alejndro, UID 1000, fish shell,
+// /home/alejndro/dev/.container home). Every other entry is a system user with
+// a nologin/false shell or a non-home directory. The old filter counted only
+// on UID >= 1000 + non-empty home, which wrongly flagged this as multi-user.
+const fedoraGetentPasswd = `root:x:0:0:root:/root:/bin/bash
+bin:x:1:1:bin:/bin:/sbin/nologin
+daemon:x:2:2:daemon:/sbin:/sbin/nologin
+nobody:x:65534:65534:Kernel Overflow User:/:/sbin/nologin
+unbound:x:995:992:Unbound DNS resolver:/etc/unbound:/sbin/nologin
+systemd-coredump:x:994:994:systemd Core Dumper:/:/sbin/nologin
+polkitd:x:993:993:User for polkitd:/:/sbin/nologin
+tss:x:59:59:Account used by the trousers package to sandbox the tcsd daemon:/dev/null:/sbin/nologin
+ale:x:991:990:Ale:/home/ale:/usr/sbin/nologin
+ale:x:990:989:Ale:/home/ale2:/bin/false
+ale:x:989:988:Ale:/home/ale3:/usr/bin/false
+ale:x:988:987:Ale:/home/ale4:/bin/true
+ale:x:987:986:Ale:/home/ale5:/usr/bin/true
+ale:x:986:985:Ale::/bin/bash
+ale:x:985:984:Ale:/:/bin/bash
+ale:x:984:983:Ale:/nonexistent:/bin/bash
+ale:x:983:982:Ale:/home/ale8:/sbin/nologin
+ale:x:982:981:Ale:/home/ale9:/usr/sbin/nologin
+ale:x:981:980:Ale:/home/ale10:/bin/false
+ale:x:980:979:Ale:/home/ale11:/usr/bin/false
+ale:x:979:978:Ale:/home/ale12:/bin/true
+ale:x:978:977:Ale:/home/ale13:/usr/bin/true
+alejndro:x:1000:1000:Alejndro:/home/alejndro/dev/.container:/usr/bin/fish
+`
+
+// TestDetectMultiUser_RealFedora verifies a real Fedora 45 container with 22
+// users (only one real: alejndro, UID 1000, fish shell, real home) returns
+// nil — NOT ErrMultiUser. This reproduces the E2E bug where system users with
+// nologin/false shells and non-home directories were wrongly counted.
+func TestDetectMultiUser_RealFedora(t *testing.T) {
+	r := newFakeRunner()
+	r.execOut["getent passwd"] = fedoraGetentPasswd
+	err := DetectMultiUser(context.Background(), r, "bunker")
+	if err != nil {
+		t.Errorf("DetectMultiUser(real fedora) err = %v, want nil", err)
+	}
+}
+
+// TestDetectMultiUser_TwoRealUsers verifies two genuine users (UID >= 1000,
+// real shell, real home) still trip ErrMultiUser.
+func TestDetectMultiUser_TwoRealUsers(t *testing.T) {
+	r := newFakeRunner()
+	r.execOut["getent passwd"] = `root:x:0:0:root:/root:/bin/bash
+bin:x:1:1:bin:/bin:/sbin/nologin
+alice:x:1000:1000:Alice:/home/alice:/bin/bash
+bob:x:1001:1001:Bob:/home/bob:/usr/bin/fish
+`
+	err := DetectMultiUser(context.Background(), r, "shared")
+	if !errors.Is(err, ErrMultiUser) {
+		t.Errorf("DetectMultiUser(two real users) err = %v, want ErrMultiUser", err)
+	}
+}
+
+// TestDetectMultiUser_SystemUserWithRealShell verifies a system user below the
+// UID threshold but with a real shell and home (e.g. unbound on some distros)
+// is NOT counted, while the one UID-1000 user is — so nil is returned.
+func TestDetectMultiUser_SystemUserWithRealShell(t *testing.T) {
+	r := newFakeRunner()
+	r.execOut["getent passwd"] = `root:x:0:0:root:/root:/bin/bash
+unbound:x:999:999:Unbound DNS resolver:/home/unbound:/bin/bash
+alejndro:x:1000:1000:Alejndro:/home/alejndro:/bin/bash
+`
+	err := DetectMultiUser(context.Background(), r, "bunker")
+	if err != nil {
+		t.Errorf("DetectMultiUser(system user w/ real shell) err = %v, want nil", err)
+	}
+}
+
 // --- DetectBase: os-release parsing (REQ-YAML-3) ---
 
 // TestDetectBase_Fedora verifies the happy path: /etc/os-release with ID=fedora
