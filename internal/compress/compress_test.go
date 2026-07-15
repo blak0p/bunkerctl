@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -70,6 +71,38 @@ func TestZstdTar_Compress_EmptyDir(t *testing.T) {
 	}
 	if fi.Size() == 0 {
 		t.Fatalf("dest for empty dir is empty; want non-empty (tar headers)")
+	}
+}
+
+// TestZstdTar_EncoderLevelIsDefault verifies REQ-COMP-2: the zstd encoder MUST
+// be created with SpeedDefault (level 3). We assert on the exported
+// EncoderLevel var, which Compress sets when building the writer. This makes
+// the choice explicit and testable rather than relying on the library default.
+func TestZstdTar_EncoderLevelIsDefault(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "a.txt"), "alpha")
+	dest := filepath.Join(t.TempDir(), "out.bunker")
+	if err := (ZstdTar{}).Compress(src, dest); err != nil {
+		t.Fatalf("Compress error: %v", err)
+	}
+	if EncoderLevel != zstd.SpeedDefault {
+		t.Errorf("EncoderLevel = %v, want zstd.SpeedDefault (level 3)", EncoderLevel)
+	}
+}
+
+// TestZstdTar_Level3RoundTrips triangulates REQ-COMP-2: a compressor running at
+// SpeedDefault (level 3) MUST produce output that a standard zstd+tar reader
+// can decompress back to the original contents.
+func TestZstdTar_Level3RoundTrips(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "data.txt"), strings.Repeat("x", 2048))
+	dest := filepath.Join(t.TempDir(), "lvl3.bunker")
+	if err := (ZstdTar{}).Compress(src, dest); err != nil {
+		t.Fatalf("Compress error: %v", err)
+	}
+	got := decodeZstdTar(t, dest)
+	if got["data.txt"] != strings.Repeat("x", 2048) {
+		t.Errorf("round-trip content mismatch for data.txt")
 	}
 }
 

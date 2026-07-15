@@ -17,6 +17,12 @@ import (
 // ErrCompressFailed is returned when archive creation or extraction fails.
 var ErrCompressFailed = errors.New("compress failed")
 
+// EncoderLevel is the zstd encoder level used by Compress. It is recorded as a
+// package-level var so tests can assert the choice is explicit (REQ-COMP-2).
+// zstd.SpeedDefault corresponds to level 3 (EncoderLevelFromZstd(3) == SpeedDefault),
+// prioritizing speed over maximum compression.
+var EncoderLevel = zstd.SpeedDefault
+
 // Compressor creates a compressed archive of a directory tree.
 type Compressor interface {
 	Compress(srcDir, destPath string) error
@@ -46,7 +52,7 @@ func (ZstdTar) Compress(srcDir, destPath string) error {
 		return ErrCompressFailed
 	}
 	defer out.Close()
-	enc, err := zstd.NewWriter(out)
+	enc, err := zstd.NewWriter(out, zstd.WithEncoderLevel(EncoderLevel))
 	if err != nil {
 		return ErrCompressFailed
 	}
