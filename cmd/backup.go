@@ -261,6 +261,11 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "error: detecting package managers: %v\n", err)
 		return err
 	}
+	// Deduplicate overlapping managers: on modern Fedora, both `dnf` and
+	// `dnf5` are present, and `dnf` is typically a wrapper around dnf5 —
+	// listing both reads the same DB twice and duplicates the manifest. Prefer
+	// the modern manager (dnf5) when both are detected.
+	managers = dedupeManagers(managers)
 	var allPkgs []string
 	if len(managers) > 0 {
 		lister := packages.DefaultLister{}
@@ -272,6 +277,11 @@ func runBackup(cmd *cobra.Command, args []string) error {
 			}
 			allPkgs = append(allPkgs, pkgs...)
 		}
+		// Defense in depth: if a manager's lister ever returns duplicates
+		// (e.g. a quirky upstream command), the manifest must not contain
+		// duplicate keys. The TOML writer would error out, the re-parse
+		// would fail, and the user would lose the backup.
+		allPkgs = dedupeStrings(allPkgs)
 	} else {
 		fmt.Fprintln(cmd.OutOrStdout(), "no package manager detected; continuing without a package list")
 	}
@@ -439,4 +449,46 @@ func displayName(c podman.Container) string {
 		return c.Names[0]
 	}
 	return c.ID
+}
+
+// dedupeManagers removes overlapping managers from a detector result, keeping
+// the canonical (most modern) member of each family. Today: when BOTH `dnf`
+// and `dnf5` are detected, prefer dnf5 and drop dnf — on Fedora 40+ dnf is a
+// thin wrapper around dnf5 and they read the same package database, so listing
+// both duplicates every package in the manifest. Other managers pass through
+// untouched. Order is preserved.
+func dedupeManagers(in []packages.Manager) []packages.Manager {
+	hasDnf5 := false
+	for _, m := range in {
+		if m == packages.ManagerDnf5 {
+			hasDnf5 = true
+			break
+		}
+	}
+	out := make([]packages.Manager, 0, len(in))
+	for _, m := range in {
+		if m == packages.ManagerDnf && hasDnf5 {
+			// dnf is a wrapper for dnf5 on modern Fedora; drop it.
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// dedupeStrings returns a new slice with the unique strings from in, preserving
+// first-occurrence order. Used to defend the manifest writer against duplicate
+// keys (TOML forbids them) when an upstream lister command returns duplicate
+// lines for any reason.
+func dedupeStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
