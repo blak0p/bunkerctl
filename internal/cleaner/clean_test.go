@@ -39,6 +39,17 @@ func (r *recordingRunner) InspectRaw(ctx context.Context, id string) (string, er
 	return "", nil
 }
 
+// The following methods satisfy the restore-core additions to podman.Runner.
+// Cleaner does not exercise them; they are no-op stubs so recordingRunner
+// remains a valid Runner double after the interface expanded.
+func (r *recordingRunner) Create(ctx context.Context, image, name string, env []string) error {
+	return nil
+}
+func (r *recordingRunner) Start(ctx context.Context, name string) error  { return nil }
+func (r *recordingRunner) Cp(ctx context.Context, src, dst string) error { return nil }
+func (r *recordingRunner) Pull(ctx context.Context, image string) error  { return nil }
+func (r *recordingRunner) Remove(ctx context.Context, name string) error { return nil }
+
 // TestCleaner_Clean_Apt is the RED anchor: DefaultCleaner.Clean with [ManagerApt]
 // MUST call runner.Exec exactly once with ["rm","-rf","/var/cache/apt/archives"].
 func TestCleaner_Clean_Apt(t *testing.T) {
