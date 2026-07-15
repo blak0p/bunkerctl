@@ -73,10 +73,9 @@ func TestLocalStager_Prepare_CreatesFilesDir(t *testing.T) {
 	}
 }
 
-// TestLocalStager_Prepare_CreatesPreserveDir triangulates: the legacy preserve/
-// subdirectory is still created during the transition (removed once the v0.1.0
-// host-side copy path is deleted).
-func TestLocalStager_Prepare_CreatesPreserveDir(t *testing.T) {
+// TestLocalStager_Prepare_NoPreserveDir triangulates: the old v0.1.0 preserve/
+// subdirectory MUST NOT be created anymore (it was the host-side bug vector).
+func TestLocalStager_Prepare_NoPreserveDir(t *testing.T) {
 	root := t.TempDir()
 	stager := LocalStager{Root: root, ContainerID: "c2"}
 	dir, cleanup, err := stager.Prepare()
@@ -86,8 +85,8 @@ func TestLocalStager_Prepare_CreatesPreserveDir(t *testing.T) {
 	defer cleanup()
 
 	preserveDir := filepath.Join(dir, "preserve")
-	if _, err := os.Stat(preserveDir); err != nil {
-		t.Errorf("preserve/ subdir not created: %v", err)
+	if _, err := os.Stat(preserveDir); !os.IsNotExist(err) {
+		t.Errorf("preserve/ still created err = %v, want ErrNotExist (removed in v1)", err)
 	}
 }
 
